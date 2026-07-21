@@ -7,7 +7,7 @@ from os import terminal_size
 from unittest.mock import patch
 
 from guardrails_cli.ui.renderers import render_scan_report
-from guardrails_cli.ui.panels import LOGO_PIXELS, banner, logo_lines
+from guardrails_cli.ui.panels import LOGO_PIXELS, banner, compact_logo_lines, logo_lines
 from guardrails_cli.ui.tables import ANSI_RE, table, visible_len
 from guardrails_cli.ui.theme import color, severity_label
 
@@ -221,6 +221,12 @@ class CliUiTests(unittest.TestCase):
         ):
             output = banner()
         self.assertGreaterEqual(len(output.splitlines()), 12)
+
+    def test_compact_product_mark_preserves_website_logo_geometry(self) -> None:
+        with patch.dict(os.environ, {"FORCE_COLOR": "1"}, clear=True):
+            lines = compact_logo_lines()
+        self.assertEqual(len(lines), 5)
+        self.assertTrue(all(visible_len(line) <= 10 for line in lines))
 
 
 if __name__ == "__main__":

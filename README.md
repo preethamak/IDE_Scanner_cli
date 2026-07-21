@@ -25,13 +25,24 @@ On Windows, replace `.venv/bin/` with `.venv\Scripts\`.
 
 ## Scan installed extensions
 
-Start the interactive installed-extension picker:
+Open the interactive Local Scan application:
 
 ```bash
-guardrails scan
+guardrails
 ```
 
-The picker displays at most ten installations per page. Search with `/query`, move with `n` and `p`, toggle rows with `1,3-5`, and press `d` to scan the selected installations. `a` explicitly selects every filtered match; Guardrails never dumps the entire installed inventory into the terminal by default.
+The full-screen terminal application supports keyboard and mouse input. Start typing in the search field, use the IDE and analysis-profile filters, move with the arrow keys, toggle extensions with `Space`, and scan with the labelled button or `Ctrl+S`. Results and one-click HTML, ZIP, JSON, and Markdown exports remain inside the application.
+
+Press `?` at any time for contextual help. The complete command manual is also available without opening the application:
+
+```bash
+guardrails help
+guardrails help scan
+guardrails help reports
+guardrails help shortcuts
+```
+
+`guardrails scan` also opens Local Scan when no flags are supplied. Explicit flags keep the stable non-interactive interface for scripts and CI.
 
 Search and select from installed extensions:
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "guardrails-ide-scanner"
-version = "0.2.0"
+version = "0.3.0"
 description = "Guardrails local IDE extension scanner."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,6 +12,7 @@ license = "MIT"
 authors = [{ name = "preethamak" }]
 dependencies = [
   "ide-scanner @ git+https://github.com/preethamak/IDE_Scanner.git@9a51c780c109f17d2969b5e8ea10373039220cc0",
+  "textual>=8.2.8,<9",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",

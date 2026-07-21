@@ -55,6 +55,17 @@ def logo_lines() -> list[str]:
     ]
 
 
+def compact_logo_lines() -> list[str]:
+    """Render a 10×5 mark derived from the same website-logo pixel sample."""
+    if not supports_color():
+        return []
+    pixels = tuple(tuple(row[index] for index in range(0, len(row), 2)) for row in LOGO_PIXELS[::2])
+    return [
+        "".join(_half_cell(top, bottom) for top, bottom in zip(pixels[index], pixels[index + 1])).rstrip()
+        for index in range(0, len(pixels), 2)
+    ]
+
+
 def banner(subtitle: str = "Local IDE extension scanner") -> str:
     mark = logo_lines()
     if not mark:

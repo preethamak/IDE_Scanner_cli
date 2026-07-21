@@ -15,7 +15,9 @@ from . import __version__
 from .exporters.html import export_html
 from .exporters.json_export import export_json
 from .exporters.markdown import export_markdown
+from .help_manual import TOPICS, manual
 from .report_reader import read_report, report_view, validate_report
+from .scan_service import run_with_profile, scan_installed
 from .scanner_adapter import (
     discover_paths,
     display_report,
@@ -27,7 +29,6 @@ from .scanner_adapter import (
     search_extensions,
     write_bundle,
 )
-from .snapshot import snapshot_installations
 from .ui.panels import banner, panel, section
 from .ui.prompts import confirm, prompt_choice, prompt_text
 from .ui.renderers import render_rules, render_scan_report
@@ -47,10 +48,12 @@ def main(argv: list[str] | None = None) -> int:
             if not sys.stdin.isatty():
                 build_parser().print_help()
                 return 0
-            return interactive_home()
+            return interactive_application()
         parser = build_parser()
         args = parser.parse_args(arguments)
         if args.command == "scan":
+            if arguments == ["scan"] and sys.stdin.isatty() and sys.stdout.isatty():
+                return interactive_application()
             return cmd_scan(args)
         if args.command == "report":
             return cmd_report(args)
@@ -60,6 +63,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_metrics(args)
         if args.command == "doctor":
             return cmd_doctor(args)
+        if args.command == "help":
+            return cmd_help(args)
+        if args.command == "tui":
+            return interactive_application()
         if args.command == "version":
             print(f"Guardrails {__version__}")
             return 0
@@ -128,52 +135,31 @@ def build_parser() -> argparse.ArgumentParser:
     metrics = subparsers.add_parser("metrics", help="Explain decisions, scores, evidence, and coverage.")
     metrics.add_argument("topic", nargs="?", choices=("decisions", "scores", "evidence", "coverage", "all"), default="all")
     subparsers.add_parser("doctor", help="Check local scan dependencies and detected IDE clients.")
+    help_command = subparsers.add_parser("help", help="Read the Guardrails command and workflow manual.")
+    help_command.add_argument("topic", nargs="?", choices=TOPICS)
+    subparsers.add_parser("tui", help="Open the interactive Local Scan terminal application.")
     subparsers.add_parser("version", help="Print the Guardrails version.")
     return parser
 
 
-def interactive_home() -> int:
-    rows = installed_extensions()
-    counts: dict[str, int] = {}
-    for row in rows:
-        counts[row["client"]] = counts.get(row["client"], 0) + 1
-    detected = "\n".join(f"{client:<18} {count:>4} installed" for client, count in sorted(counts.items())) or "No supported IDE extensions detected."
-    print(banner("Local IDE extension scanner"))
-    print(panel("Installed extensions", detected, subtitle=f"{len(rows)} detected"))
-    choices = [
-        "Search or select installed extensions",
-        "Scan all installed extensions",
-        "Scan extensions from one IDE",
-        "Scan a VSIX, ZIP, or folder",
-        "Scan a Marketplace extension",
-        "View or verify a report",
-        "Environment doctor",
-        "Detection rules",
-        "Help",
-    ]
-    selected = prompt_choice("Select action", choices)
-    if selected == 0:
-        return cmd_scan(_scan_namespace())
-    if selected == 1:
-        return cmd_scan(_scan_namespace(all=True))
-    if selected == 2:
-        available = [(key, label) for key, label in (("vscode", "VS Code"), ("cursor", "Cursor"), ("windsurf", "Windsurf"), ("vscodium", "VSCodium"), ("insiders", "VS Code Insiders")) if any(_ide_key(row["client"]) == key for row in rows)]
-        if not available:
-            raise ValueError("No supported IDE extensions were detected.")
-        ide_index = prompt_choice("Select IDE", [f"{label} — {sum(_ide_key(row['client']) == key for row in rows)} installed" for key, label in available])
-        return cmd_scan(_scan_namespace(ide=available[ide_index][0]))
-    if selected == 3:
-        return cmd_scan(_scan_namespace(file=prompt_text("VSIX, ZIP, or extension folder")))
-    if selected == 4:
-        return cmd_scan(_scan_namespace(marketplace_search=prompt_text("Marketplace search")))
-    if selected == 5:
-        path = prompt_text("Report path")
-        return _view_report(path, show_all=False, extension_id=None)
-    if selected == 6:
+def interactive_application() -> int:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise ValueError("The interactive application requires a terminal. Use `guardrails scan` with explicit flags for automation.")
+    try:
+        from .tui import launch
+    except ImportError as exc:
+        raise ValueError("The interactive UI dependency is missing. Reinstall Guardrails to restore Local Scan.") from exc
+    result = launch(installed_extensions())
+    if result is None:
+        return 0
+    if result.action == "file":
+        return cmd_scan(_scan_namespace(file=result.value))
+    if result.action == "report":
+        return _view_report(result.value, show_all=False, extension_id=None)
+    if result.action == "doctor":
         return cmd_doctor(argparse.Namespace())
-    if selected == 7:
+    if result.action == "rules":
         return cmd_rules(argparse.Namespace(action="list", query=[]))
-    build_parser().print_help()
     return 0
 
 
@@ -187,7 +173,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if args.marketplace or args.marketplace_search:
         extension_id, version = _marketplace_target(args)
         print(color(f"Acquiring exact Marketplace artifact {extension_id}{f'@{version}' if version else ''}…", "brand_cyan"))
-        report = _run_with_profile(args.profile, lambda: scan_marketplace(extension_id, version=version))
+        report = run_with_profile(args.profile, lambda: scan_marketplace(extension_id, version=version))
         source = "marketplace"
     elif args.file:
         targets = discover_paths(args.file)
@@ -196,7 +182,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         print(section("Local file target"))
         print(table(["Type", "Path"], [[item.get("type"), item.get("path")] for item in targets], max_widths=[12, 88]))
         print(color("Scanning the selected local artifact without executing extension code…", "brand_cyan"))
-        report = _run_with_profile(
+        report = run_with_profile(
             args.profile,
             lambda: scan_paths([item["path"] for item in targets], online=args.online or args.profile == "deep"),
         )
@@ -206,16 +192,15 @@ def cmd_scan(args: argparse.Namespace) -> int:
         if len(selected_rows) > 1 and not args.yes and sys.stdin.isatty():
             if not confirm(f"Scan {len(selected_rows)} installed extensions", default=True):
                 return 130
-        print(color(f"Creating a stable local snapshot of {len(selected_rows)} installed extension(s)…", "brand_cyan"))
-        with snapshot_installations(selected_rows) as snapshot_rows:
-            print(color("Scanning the snapshots without executing extension code…", "brand_cyan"))
-            report = _run_with_profile(
-                args.profile,
-                lambda: scan_paths([row["path"] for row in snapshot_rows], online=args.online or args.profile == "deep"),
-            )
-            _attach_installation_context(report, snapshot_rows)
+        report, view = scan_installed(
+            selected_rows,
+            profile=args.profile,
+            online=args.online,
+            progress=lambda message: print(color(message, "brand_cyan")),
+        )
 
-    view = display_report(report, source=source, profile=args.profile)
+    if source != "installed":
+        view = display_report(report, source=source, profile=args.profile)
     if args.format == "terminal":
         print(render_scan_report(view, show_all=args.show_all))
         if args.output:
@@ -393,6 +378,11 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_help(args: argparse.Namespace) -> int:
+    print(manual(args.topic), end="")
+    return 0
+
+
 def cmd_doctor(_args: argparse.Namespace) -> int:
     installed = installed_extensions()
     engine = engine_identity()
@@ -417,43 +407,15 @@ def _export_fresh(report: dict[str, Any], fmt: str, output: str, *, source: str,
         if not ok:
             raise ValueError("The generated report failed verification: " + "; ".join(errors[:3]))
     elif fmt == "html":
+        view = display_report(report, source=source, profile=profile)
         export_html(view, output)
     elif fmt == "md":
+        view = display_report(report, source=source, profile=profile)
         export_markdown(view, output)
     elif fmt == "json":
         export_json(report, output)
     else:
         raise ValueError(f"Unsupported export format: {fmt}")
-
-
-def _attach_installation_context(report: dict[str, Any], rows: list[dict[str, Any]]) -> None:
-    by_path = {str(Path(row["path"]).resolve()): row for row in rows}
-    for extension in report.get("extensions", []):
-        if not isinstance(extension, dict):
-            continue
-        install_path = str(extension.get("install_path") or "")
-        try:
-            context = by_path.get(str(Path(install_path).resolve()))
-        except OSError:
-            context = None
-        if context:
-            extension["client"] = context["client"]
-            extension["installation_path"] = context.get("original_path") or context["path"]
-
-
-def _run_with_profile(profile: str, operation):
-    previous = os.environ.get("IDE_SCANNER_REQUIRE_PROVIDERS")
-    if profile == "deep":
-        existing = {item.strip() for item in (previous or "").split(",") if item.strip()}
-        existing.update({"semgrep", "yara", "dependency_intelligence"})
-        os.environ["IDE_SCANNER_REQUIRE_PROVIDERS"] = ",".join(sorted(existing))
-    try:
-        return operation()
-    finally:
-        if previous is None:
-            os.environ.pop("IDE_SCANNER_REQUIRE_PROVIDERS", None)
-        else:
-            os.environ["IDE_SCANNER_REQUIRE_PROVIDERS"] = previous
 
 
 def _filter_installed(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:

@@ -9,8 +9,8 @@ Extension code is never executed. Installed folders are copied into private, bou
 ## Primary flow
 
 1. Discover supported IDE installations without printing the full inventory.
-2. Search and page through at most ten results at a time.
-3. Toggle one or more installations, then explicitly start the scan.
+2. Search as the user types and filter by IDE without entering picker commands.
+3. Navigate by keyboard or mouse, toggle one or more installations, then explicitly start the scan.
 4. Show the overall decision and required action before metadata or scores.
 5. Show BLOCK, INCOMPLETE, and REVIEW results; collapse ALLOW rows by default.
 6. Export through a described, numbered format menu or explicit flags.
@@ -23,7 +23,8 @@ Extension code is never executed. Installed folders are copied into private, bou
 - 32–59 columns: stacked content, two-line identities, no wide tables.
 - 60–89 columns: compact rows with bounded identities and reasons.
 - 90+ columns: one-line picker identities where possible.
-- The picker displays ten rows per page regardless of inventory size.
+- The interactive application virtualizes scrolling through the filtered inventory and never prints the full inventory into shell history.
+- `Space` selects, `Ctrl+S` scans, `/` focuses search, and `?` opens the embedded manual.
 - The logo appears once per command. Truecolor terminals render a half-block resampling derived from the exact website PNG; HTML reports embed the original PNG.
 - `NO_COLOR` produces a clean wordmark without emitting ANSI color.
 
