@@ -42,12 +42,6 @@ def supports_color() -> bool:
     return sys.stdout.isatty()
 
 
-def truecolor() -> bool:
-    if not supports_color():
-        return False
-    return os.environ.get("COLORTERM", "").lower() in {"truecolor", "24bit"} or bool(os.environ.get("WT_SESSION"))
-
-
 def rgb(hex_color: str, *, background: bool = False) -> str:
     red, green, blue = (int(hex_color[index:index + 2], 16) for index in (1, 3, 5))
     layer = 48 if background else 38

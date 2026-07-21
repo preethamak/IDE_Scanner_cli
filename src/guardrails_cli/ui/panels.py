@@ -5,7 +5,7 @@ import textwrap
 from guardrails_cli import __version__
 
 from .tables import ANSI_RE, terminal_width, truncate, visible_len
-from .theme import RESET, color, rgb, supports_color, truecolor
+from .theme import RESET, color, rgb, supports_color
 
 
 # A 20×20 resampling of the exact PNG currently rendered by website BrandMark.
@@ -45,7 +45,9 @@ def _half_cell(top: str | None, bottom: str | None) -> str:
 
 
 def logo_lines() -> list[str]:
-    if not supports_color() or not truecolor():
+    # Many capable terminals omit COLORTERM. The interface already uses 24-bit
+    # ANSI colours, so that missing hint should never make the brand disappear.
+    if not supports_color():
         return []
     return [
         "".join(_half_cell(top, bottom) for top, bottom in zip(LOGO_PIXELS[index], LOGO_PIXELS[index + 1])).rstrip()
@@ -55,9 +57,17 @@ def logo_lines() -> list[str]:
 
 def banner(subtitle: str = "Local IDE extension scanner") -> str:
     mark = logo_lines()
-    if terminal_width() < 62 or not mark:
+    if not mark:
         width = terminal_width()
         return color("Guardrails", "bold") + "\n" + color(truncate(f"{subtitle}  ·  v{__version__}", width), "gray")
+    if terminal_width() < 62:
+        return "\n".join(
+            [
+                *mark,
+                color("Guardrails", "bold"),
+                color(truncate(f"{subtitle}  ·  v{__version__}", terminal_width()), "gray"),
+            ]
+        )
     copy = [
         color("Guardrails", "bold"),
         color(subtitle, "gray"),

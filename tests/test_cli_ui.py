@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import re
 import os
+import re
 import unittest
 from os import terminal_size
 from unittest.mock import patch
 
 from guardrails_cli.ui.renderers import render_scan_report
-from guardrails_cli.ui.panels import LOGO_PIXELS, logo_lines
+from guardrails_cli.ui.panels import LOGO_PIXELS, banner, logo_lines
 from guardrails_cli.ui.tables import ANSI_RE, table, visible_len
 from guardrails_cli.ui.theme import color, severity_label
 
@@ -209,6 +209,18 @@ class CliUiTests(unittest.TestCase):
         self.assertEqual(len(LOGO_PIXELS), 20)
         self.assertEqual(len(lines), 10)
         self.assertTrue(all(visible_len(line) <= 20 for line in lines))
+
+    def test_logo_is_not_hidden_when_colorterm_is_missing(self) -> None:
+        with patch.dict(os.environ, {"FORCE_COLOR": "1"}, clear=True):
+            lines = logo_lines()
+        self.assertEqual(len(lines), 10)
+
+    def test_narrow_banner_keeps_the_logo(self) -> None:
+        with patch.dict(os.environ, {"FORCE_COLOR": "1"}, clear=True), patch(
+            "guardrails_cli.ui.tables.shutil.get_terminal_size", return_value=terminal_size((40, 24))
+        ):
+            output = banner()
+        self.assertGreaterEqual(len(output.splitlines()), 12)
 
 
 if __name__ == "__main__":
