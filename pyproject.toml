@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "guardrails-ide-scanner"
-version = "0.1.0"
+version = "0.2.0"
 description = "Guardrails local IDE extension scanner."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -38,6 +38,9 @@ Issues = "https://github.com/preethamak/IDE_Scanner_cli/issues"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["guardrails_cli*"]
+
+[tool.setuptools.package-data]
+guardrails_cli = ["assets/*.png"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

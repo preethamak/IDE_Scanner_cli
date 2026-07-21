@@ -3,11 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ._atomic import write_text
+
 
 def export_markdown(report: dict[str, Any], output: str | Path) -> Path:
     path = Path(output)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(to_markdown(report), encoding="utf-8")
+    write_text(path, to_markdown(report))
     return path
 
 
@@ -16,17 +17,19 @@ def to_markdown(report: dict[str, Any]) -> str:
     metadata = dict(report.get("metadata") or {})
     extensions = [item for item in report.get("extensions", []) if isinstance(item, dict)]
     counts = _counts(summary, extensions)
+    overall = next((decision for decision in ("block", "incomplete", "review", "allow") if counts[decision]), "incomplete")
+    next_action = {
+        "block": "Disable the blocked extensions and review the evidence before restoring them.",
+        "incomplete": "Resolve incomplete provider coverage, then scan again before making a trust decision.",
+        "review": "Review the highlighted evidence before keeping these extensions enabled.",
+        "allow": "No action is required for this scan.",
+    }[overall]
     lines = [
         "# Guardrails local extension report",
         "",
-        "## Scan identity",
+        f"## Outcome: {overall.upper()}",
         "",
-        f"- Scan ID: `{metadata.get('scan_id') or report.get('scan_id', 'unknown')}`",
-        f"- Created: {metadata.get('created_at') or report.get('created_at', 'unknown')}",
-        f"- Scanner: `{metadata.get('scanner_version', 'unknown')}`",
-        f"- Scanner build: `{metadata.get('scanner_build', 'unknown')}`",
-        f"- Ruleset: `{metadata.get('ruleset_version', 'unknown')}`",
-        f"- Extensions: {len(extensions)}",
+        next_action,
         "",
         "## Decisions",
         "",
@@ -37,6 +40,19 @@ def to_markdown(report: dict[str, Any]) -> str:
     ]
     for extension in sorted(extensions, key=_priority, reverse=True):
         lines.extend(_extension_markdown(extension))
+    lines.extend(
+        [
+            "## Scan identity",
+            "",
+            f"- Scan ID: `{metadata.get('scan_id') or report.get('scan_id', 'unknown')}`",
+            f"- Created: {metadata.get('created_at') or report.get('created_at', 'unknown')}",
+            f"- Scanner: `{metadata.get('scanner_version', 'unknown')}`",
+            f"- Scanner build: `{metadata.get('scanner_build', 'unknown')}`",
+            f"- Ruleset: `{metadata.get('ruleset_version', 'unknown')}`",
+            f"- Extensions: {len(extensions)}",
+            "",
+        ]
+    )
     return "\n".join(lines).rstrip() + "\n"
 
 

@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import re
+import os
 import unittest
 from os import terminal_size
 from unittest.mock import patch
 
 from guardrails_cli.ui.renderers import render_scan_report
+from guardrails_cli.ui.panels import LOGO_PIXELS, logo_lines
 from guardrails_cli.ui.tables import ANSI_RE, table, visible_len
 from guardrails_cli.ui.theme import color, severity_label
 
 
 EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]")
-ALLOWED_SEVERITY_EMOJI = {"🔴", "🟠", "🟡"}
+ALLOWED_SEVERITY_EMOJI: set[str] = set()
 
 
 class CliUiTests(unittest.TestCase):
@@ -74,9 +76,9 @@ class CliUiTests(unittest.TestCase):
         self.assertNotIn("Marketplace/re...", output)
 
     def test_severity_labels_keep_only_priority_emoji(self) -> None:
-        self.assertEqual(severity_label("critical"), "🔴 CRITICAL")
-        self.assertEqual(severity_label("high"), "🟠 HIGH")
-        self.assertEqual(severity_label("medium"), "🟡 MEDIUM")
+        self.assertEqual(severity_label("critical"), "● CRITICAL")
+        self.assertEqual(severity_label("high"), "● HIGH")
+        self.assertEqual(severity_label("medium"), "● MEDIUM")
         self.assertEqual(severity_label("low"), "LOW")
         self.assertEqual(severity_label("info"), "INFO")
 
@@ -117,8 +119,8 @@ class CliUiTests(unittest.TestCase):
         emojis = set(EMOJI_RE.findall(output))
 
         self.assertTrue(emojis <= ALLOWED_SEVERITY_EMOJI)
-        self.assertIn("Scan ID", output)
-        self.assertIn("GUARDRAILS", output)
+        self.assertIn("Scan scan-1", output)
+        self.assertIn("Guardrails", output)
         self.assertIn("REVIEW", output)
         self.assertIn("Analysis coverage", output)
 
@@ -174,9 +176,39 @@ class CliUiTests(unittest.TestCase):
             output = render_scan_report(report)
 
         self.assertTrue(all(visible_len(line) <= 40 for line in output.splitlines()))
-        self.assertIn("Installed extensions", output)
+        self.assertIn("Action required", output)
         self.assertIn("REVIEW", output)
         self.assertIn("publisher.extremely", output)
+
+    def test_report_never_exceeds_common_terminal_widths(self) -> None:
+        report = {
+            "metadata": {"scan_id": "scan-width", "profile": "standard", "source": "installed"},
+            "summary": {},
+            "extensions": [{
+                "extension_id": "publisher.extension-with-a-long-identity",
+                "version": "1.2.3",
+                "client": "VS Code Insiders",
+                "decision": "review",
+                "severity": "HIGH",
+                "decision_reason": "This intentionally long decision reason must wrap without crossing the terminal boundary at any supported width.",
+                "risk_score": 61,
+                "malware_score": 0,
+                "coverage_percent": 100,
+                "findings": [],
+            }],
+        }
+        for width in (32, 40, 60, 80, 120):
+            with self.subTest(width=width), patch("guardrails_cli.ui.tables.shutil.get_terminal_size", return_value=terminal_size((width, 24))):
+                output = render_scan_report(report)
+            self.assertTrue(all(visible_len(line) <= width for line in output.splitlines()), output)
+
+    def test_truecolor_logo_preserves_square_half_block_geometry(self) -> None:
+        with patch.dict(os.environ, {"FORCE_COLOR": "1", "COLORTERM": "truecolor"}, clear=False):
+            os.environ.pop("NO_COLOR", None)
+            lines = logo_lines()
+        self.assertEqual(len(LOGO_PIXELS), 20)
+        self.assertEqual(len(lines), 10)
+        self.assertTrue(all(visible_len(line) <= 20 for line in lines))
 
 
 if __name__ == "__main__":

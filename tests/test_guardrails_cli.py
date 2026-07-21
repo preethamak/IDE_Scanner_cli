@@ -6,6 +6,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 from guardrails_cli import main as cli
+from guardrails_cli.ui.prompts import prompt_choice
 
 
 class GuardrailsCliTests(unittest.TestCase):
@@ -20,24 +21,31 @@ class GuardrailsCliTests(unittest.TestCase):
         code, output, error = self.run_cli(["version"])
         self.assertEqual(code, 0)
         self.assertEqual(error, "")
-        self.assertIn("Guardrails 0.1.0", output)
+        self.assertIn("Guardrails 0.2.0", output)
+
+    def test_standard_version_flag_is_supported(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+            cli.main(["--version"])
+        self.assertEqual(stopped.exception.code, 0)
+        self.assertIn("Guardrails 0.2.0", output.getvalue())
 
     def test_noninteractive_installed_scan_requires_selection(self) -> None:
         rows = [{"client": "VS Code", "path": "/tmp/ext", "extension_id": "one.ext", "display_name": "One", "publisher": "one", "version": "1.0.0"}]
         with patch("guardrails_cli.main.installed_extensions", return_value=rows), patch("guardrails_cli.main.sys.stdin.isatty", return_value=False):
             code, _output, error = self.run_cli(["scan"])
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 2)
         self.assertIn("--all, --extension, or --select", error)
 
     def test_missing_report_is_a_product_error_not_a_traceback(self) -> None:
         code, _output, error = self.run_cli(["report", "view", "/tmp/guardrails-missing-report.zip"])
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 2)
         self.assertIn("Report does not exist", error)
         self.assertNotIn("Traceback", error)
 
     def test_invalid_offline_online_combination_is_rejected(self) -> None:
         code, _output, error = self.run_cli(["scan", "--all", "--profile", "offline", "--online"])
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 2)
         self.assertIn("cannot be combined", error)
 
     def test_installed_search_filters_before_selection(self) -> None:
@@ -50,12 +58,38 @@ class GuardrailsCliTests(unittest.TestCase):
             selected = cli._select_installed(args)
         self.assertEqual([item["extension_id"] for item in selected], ["sample.two"])
 
-    def test_duplicate_installations_are_detected_before_zip_export(self) -> None:
-        view = {"extensions": [
-            {"extension_id": "sample.ext", "version": "1.0.0", "client": "VS Code"},
-            {"extension_id": "sample.ext", "version": "1.0.0", "client": "Cursor"},
-        ]}
-        self.assertEqual(cli._duplicate_installation_identities(view), [("sample.ext", "1.0.0")])
+    def test_picker_is_bounded_and_searchable_for_large_inventories(self) -> None:
+        rows = [
+            {"client": "VS Code", "path": f"/tmp/{index}", "extension_id": f"sample.ext-{index}", "display_name": f"Extension {index}", "publisher": "sample", "version": "1.0.0"}
+            for index in range(100)
+        ]
+        rows[73]["display_name"] = "Solidity Tools"
+        output = io.StringIO()
+        with patch("builtins.input", side_effect=["/solidity", "1", "d"]), redirect_stdout(output):
+            selected = cli._interactive_installed_picker(rows)
+        self.assertEqual([item["extension_id"] for item in selected], ["sample.ext-73"])
+        self.assertIn("100 detected", output.getvalue())
+        self.assertIn("1 match", output.getvalue())
+        self.assertNotIn("Extension 99", output.getvalue())
+
+    def test_fail_on_policy_has_stable_exit_codes(self) -> None:
+        block = {"extensions": [{"decision": "block"}]}
+        review = {"extensions": [{"decision": "review"}]}
+        incomplete = {"extensions": [{"decision": "incomplete"}]}
+        self.assertEqual(cli._scan_exit_code(block, "block"), 1)
+        self.assertEqual(cli._scan_exit_code(review, "block"), 0)
+        self.assertEqual(cli._scan_exit_code(review, "review"), 1)
+        self.assertEqual(cli._scan_exit_code(incomplete, "never"), 3)
+
+    def test_export_menu_prints_numbered_formats_before_prompting(self) -> None:
+        choices = ["HTML — readable report (recommended)", "ZIP — verifiable evidence bundle", "Skip export"]
+        output = io.StringIO()
+        with patch("builtins.input", return_value="2"), redirect_stdout(output):
+            selected = prompt_choice("Choose export format", choices)
+        self.assertEqual(selected, 1)
+        self.assertIn("1  HTML", output.getvalue())
+        self.assertIn("2  ZIP", output.getvalue())
+        self.assertIn("3  Skip", output.getvalue())
 
 
 if __name__ == "__main__":

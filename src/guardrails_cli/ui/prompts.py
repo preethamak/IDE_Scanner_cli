@@ -1,19 +1,28 @@
 from __future__ import annotations
 
+import textwrap
 from typing import Sequence
 
+from .tables import terminal_width
 from .theme import color
 
 
 def prompt_text(label: str, *, default: str = "") -> str:
     suffix = f" [{default}]" if default else ""
-    value = input(color(f"{label}{suffix}: ", "cyan")).strip()
+    value = input(color(f"{label}{suffix}: ", "brand")).strip()
     return value or default
 
 
-def prompt_choice(label: str, choices: Sequence[str], *, default: int = 0) -> int:
+def prompt_choice(label: str, choices: Sequence[str], *, default: int = 0, show_choices: bool = True) -> int:
+    if show_choices:
+        width = max(20, terminal_width() - 7)
+        for index, choice in enumerate(choices, start=1):
+            wrapped = textwrap.wrap(str(choice), width=width, break_long_words=False, break_on_hyphens=False) or [""]
+            print(f"  {color(index, 'brand')}  {wrapped[0]}")
+            for line in wrapped[1:]:
+                print(f"     {line}")
     while True:
-        raw = input(color(f"{label} [{default + 1}]: ", "cyan")).strip()
+        raw = input(color(f"{label} [{default + 1}]: ", "brand")).strip()
         if not raw:
             return default
         if raw.isdigit():
@@ -25,7 +34,7 @@ def prompt_choice(label: str, choices: Sequence[str], *, default: int = 0) -> in
 
 def confirm(label: str, *, default: bool = False) -> bool:
     suffix = "Y/n" if default else "y/N"
-    raw = input(color(f"{label} [{suffix}]: ", "cyan")).strip().lower()
+    raw = input(color(f"{label} [{suffix}]: ", "brand")).strip().lower()
     if not raw:
         return default
     return raw in {"y", "yes"}

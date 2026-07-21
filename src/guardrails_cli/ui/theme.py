@@ -10,23 +10,25 @@ STYLES = {
     "dim": "\033[2m",
     "cyan": "\033[36m",
     "blue": "\033[34m",
-    "green": "\033[32m",
-    "yellow": "\033[33m",
-    "orange": "\033[38;5;208m",
-    "red": "\033[31m",
-    "violet": "\033[35m",
+    "green": "\033[38;2;31;138;76m",
+    "yellow": "\033[38;2;154;101;18m",
+    "orange": "\033[38;2;154;101;18m",
+    "red": "\033[38;2;180;55;61m",
+    "violet": "\033[38;2;103;81;155m",
     "brand_pink": "\033[38;2;241;59;113m",
     "brand_cyan": "\033[38;2;23;174;253m",
     "brand_blue": "\033[38;2;58;69;193m",
-    "brand": "\033[38;2;58;69;193m",
-    "gray": "\033[90m",
+    "brand": "\033[38;2;201;255;69m",
+    "brand_ink": "\033[38;2;93;120;0m",
+    "ink": "\033[38;2;20;32;43m",
+    "gray": "\033[38;2;117;129;140m",
     "white": "\033[97m",
 }
 
 SEVERITY_ICON = {
-    "CRITICAL": "🔴 CRITICAL",
-    "HIGH": "🟠 HIGH",
-    "MEDIUM": "🟡 MEDIUM",
+    "CRITICAL": "● CRITICAL",
+    "HIGH": "● HIGH",
+    "MEDIUM": "● MEDIUM",
     "LOW": "LOW",
     "INFO": "INFO",
 }
@@ -46,12 +48,10 @@ def truecolor() -> bool:
     return os.environ.get("COLORTERM", "").lower() in {"truecolor", "24bit"} or bool(os.environ.get("WT_SESSION"))
 
 
-def background(hex_color: str, value: str = "  ") -> str:
-    """Render one sampled logo pixel using its original RGB value."""
-    if not supports_color():
-        return value
+def rgb(hex_color: str, *, background: bool = False) -> str:
     red, green, blue = (int(hex_color[index:index + 2], 16) for index in (1, 3, 5))
-    return f"\033[48;2;{red};{green};{blue}m{value}{RESET}"
+    layer = 48 if background else 38
+    return f"\033[{layer};2;{red};{green};{blue}m"
 
 
 def color(text: object, style: str) -> str:
@@ -70,15 +70,13 @@ def verdict_style(verdict: str, state: str = "") -> str:
     value = (state or verdict or "").lower()
     if "block" in value or "malicious" in value:
         return "red"
-    if "suspicious" in value:
-        return "orange"
-    if "review" in value:
+    if "suspicious" in value or "review" in value:
         return "yellow"
     if "allow" in value or "safe" in value or "clean" in value:
         return "green"
     if "incomplete" in value:
         return "violet"
-    return "blue"
+    return "gray"
 
 
 def severity_style(severity: str) -> str:
@@ -89,7 +87,7 @@ def severity_style(severity: str) -> str:
         return "yellow"
     if value == "LOW":
         return "cyan"
-    return "blue"
+    return "gray"
 
 
 def severity_label(severity: str) -> str:

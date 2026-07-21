@@ -145,6 +145,12 @@ def validate_report_data(data: dict[str, Any], *, zipped: bool = False) -> list[
         reused = len([ref for ref in detail_refs if ref]) - len({ref for ref in detail_refs if ref})
         if reused:
             errors.append(f"{reused} extension row(s) reuse another installation's detail reference")
+        installation_ids = [str(row.get("installation_id") or "") for row in rows if isinstance(row, dict)]
+        if any(installation_ids):
+            if not all(installation_ids):
+                errors.append("leaderboard mixes rows with and without installation IDs")
+            elif len(installation_ids) != len(set(installation_ids)):
+                errors.append("leaderboard contains duplicate installation IDs")
         for index, row in enumerate(rows):
             if not isinstance(row, dict):
                 errors.append(f"leaderboard row {index + 1} is not an object")

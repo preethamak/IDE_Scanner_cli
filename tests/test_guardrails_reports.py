@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+import base64
 import json
 import tempfile
 import unittest
 import warnings
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from importlib.resources import files
 
 from guardrails_cli.report_reader import report_view, validate_report
 from guardrails_cli.exporters.html import to_html
+from guardrails_cli.exporters.markdown import to_markdown
 from guardrails_cli.scanner_adapter import write_bundle
-from guardrails_cli.ui.panels import LOGO_PIXELS
 
 
 class GuardrailsReportTests(unittest.TestCase):
@@ -49,21 +50,38 @@ class GuardrailsReportTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("duplicate entry", " ".join(errors).lower())
 
-    def test_html_uses_the_same_sampled_brand_mark_as_the_terminal(self) -> None:
+    def test_html_embeds_the_exact_website_brand_mark(self) -> None:
         report = {"metadata": {"scan_id": "scan-1"}, "summary": {}, "extensions": []}
         output = to_html(report)
-        colored_pixels = sum(pixel is not None for row in LOGO_PIXELS for pixel in row)
-        self.assertEqual(output.count('<i style="background:'), colored_pixels)
-        self.assertIn("#f13b72", output)
-        self.assertIn("#17aefd", output)
+        expected = base64.b64encode(files("guardrails_cli").joinpath("assets/guardrails-mark.png").read_bytes()).decode("ascii")
+        self.assertIn(f"data:image/png;base64,{expected}", output)
 
-    def test_installed_bundle_keeps_the_ide_client(self) -> None:
-        report = {"extensions": [{"extension_id": "sample.ext", "version": "1.0.0", "source": "vscode", "client": "Cursor"}]}
-        with patch("guardrails_cli.scanner_adapter.write_report_bundle", return_value={}) as writer:
-            write_bundle(report, "/tmp/report.zip", source="installed")
-        bundled = writer.call_args.args[0]
-        self.assertEqual(bundled["extensions"][0]["source"], "Cursor")
-        self.assertEqual(report["extensions"][0]["source"], "vscode")
+    def test_markdown_leads_with_outcome_before_scan_identity(self) -> None:
+        report = {
+            "metadata": {"scan_id": "scan-1"},
+            "summary": {"decision_counts": {"allow": 1, "review": 1}},
+            "extensions": [],
+        }
+        output = to_markdown(report)
+        self.assertLess(output.index("## Outcome: REVIEW"), output.index("## Scan identity"))
+
+    def test_duplicate_cross_ide_installations_round_trip_in_zip(self) -> None:
+        report = {"scan_id": "scan-1", "summary": {}, "extensions": [
+            {"extension_id": "sample.ext", "name": "ext", "publisher": "sample", "version": "1.0.0", "source": "vscode", "client": "VS Code", "decision": "allow", "verdict": "clean", "severity": "INFO", "findings": []},
+            {"extension_id": "sample.ext", "name": "ext", "publisher": "sample", "version": "1.0.0", "source": "cursor", "client": "Cursor", "decision": "review", "verdict": "review", "severity": "MEDIUM", "findings": []},
+        ]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "report.zip"
+            write_bundle(report, path, source="installed")
+            ok, errors = validate_report(path)
+            with zipfile.ZipFile(path) as archive:
+                leaderboard = json.loads(archive.read("leaderboard.json"))
+        self.assertTrue(ok, errors)
+        rows = leaderboard["extensions"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len({row["detail_ref"] for row in rows}), 2)
+        self.assertEqual(len({row["installation_id"] for row in rows}), 2)
+        self.assertEqual({row["source"] for row in rows}, {"VS Code", "Cursor"})
 
 
 if __name__ == "__main__":

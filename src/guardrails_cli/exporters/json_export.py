@@ -4,9 +4,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ._atomic import write_text
+
 
 def export_json(report: dict[str, Any], output: str | Path) -> Path:
     path = Path(output)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    write_text(path, json.dumps(report, indent=2, sort_keys=True))
     return path

@@ -44,7 +44,7 @@ def truncate(value: object, width: int) -> str:
 
 
 def terminal_width(default: int = 100) -> int:
-    return max(40, shutil.get_terminal_size((default, 24)).columns)
+    return max(32, shutil.get_terminal_size((default, 24)).columns)
 
 
 def _fit_widths(headers: list[str], rows: list[list[str]], max_widths: list[int], width: int) -> list[int]:
@@ -157,7 +157,7 @@ def _split_long_token(value: str, width: int) -> list[str]:
 
 
 def _stacked_table(headers: list[str], rows: list[list[str]], width: int) -> str:
-    width = max(40, width)
+    width = max(32, width)
     key_width = min(max((visible_len(header) for header in headers), default=0), 14)
     value_width = max(12, width - key_width - 3)
     rule = "─" * min(width, max(12, width))
