@@ -66,11 +66,16 @@ def get_rules() -> dict[str, Any]:
 
 
 def engine_identity() -> dict[str, str]:
-    try:
-        package = distribution("ide-scanner")
-    except PackageNotFoundError:
+    package = None
+    for distribution_name in ("guardlens-core", "ide-scanner"):
+        try:
+            package = distribution(distribution_name)
+            break
+        except PackageNotFoundError:
+            continue
+    if package is None:
         return {"version": "unknown", "build": "unknown"}
-    build = "unknown"
+    build = f"pypi:{package.version}"
     direct_url = package.read_text("direct_url.json")
     if direct_url:
         try:
