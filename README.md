@@ -31,9 +31,11 @@ Open the interactive Local Scan application:
 guardrails
 ```
 
-The full-screen terminal application supports keyboard and mouse input. Start typing in the search field, use the IDE and analysis-profile filters, move with the arrow keys, toggle extensions with `Space`, and scan with the labelled button or `Ctrl+S`. Results and one-click HTML, ZIP, JSON, and Markdown exports remain inside the application.
+The full-screen terminal application supports keyboard and mouse input. Start typing in the search field, use the IDE and analysis-profile filters, move with the arrow keys, toggle extensions with `Space`, and scan with the labelled button or `Ctrl+S`. The result workspace shows decision, risk priority, malware evidence, coverage, and every finding for the selected installation. Press `Ctrl+C` or choose **Copy report** to copy the complete report.
 
-Press `?` at any time for contextual help. The complete command manual is also available without opening the application:
+HTML, ZIP, JSON, and Markdown exports remain inside the application. After export, Guardrails shows the absolute saved path with **Copy path** and **Open report/Open folder** actions.
+
+Press `?` at any time for contextual help. The complete command manual uses the same branded terminal interface:
 
 ```bash
 guardrails help

@@ -14,9 +14,11 @@ from textual.events import Resize
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
+    DataTable,
     Footer,
     Input,
     Label,
+    Link,
     Select,
     SelectionList,
     Static,
@@ -25,11 +27,11 @@ from textual.widgets import (
 from .exporters.html import export_html
 from .exporters.json_export import export_json
 from .exporters.markdown import export_markdown, to_markdown
-from .help_manual import interactive_manual
+from .help_manual import TOPICS, interactive_manual, manual
 from .report_reader import validate_report
 from .scan_service import scan_installed
 from .scanner_adapter import write_bundle
-from .ui.panels import compact_logo_lines
+from .ui.panels import LOGO_PIXELS
 
 
 @dataclass(frozen=True)
@@ -45,7 +47,7 @@ class HelpScreen(ModalScreen[None]):
         with Container(classes="dialog help-dialog"):
             yield Label("Guardrails manual", classes="dialog-title")
             with VerticalScroll(id="help-document"):
-                yield Static(RichMarkdown(interactive_manual()), classes="markdown-content")
+                yield Static(RichMarkdown(_rich_manual(interactive_manual())), classes="markdown-content")
             yield Button("Close", id="close-help", variant="primary")
 
     def action_dismiss(self) -> None:
@@ -54,6 +56,112 @@ class HelpScreen(ModalScreen[None]):
     @on(Button.Pressed, "#close-help")
     def close_help(self) -> None:
         self.dismiss(None)
+
+
+class HelpApp(App[None]):
+    TITLE = "Guardrails Manual"
+    SUB_TITLE = "Local Scan"
+
+    CSS = """
+    $surface: #14202b;
+    $ink: #eef3f6;
+    $muted: #8fa0ad;
+    $brand: #c9ff45;
+
+    Screen { background: #0c1218; color: $ink; }
+    #manual-hero { height: 7; padding: 0 2; background: $surface; border-bottom: solid $brand; }
+    #manual-mark { width: 13; height: 6; padding-top: 1; }
+    #manual-brand { width: 1fr; height: 6; padding: 1 1 0 1; }
+    #manual-wordmark { height: 2; text-style: bold; }
+    #manual-title { height: 1; color: $brand; }
+    #manual-subtitle { height: 1; color: $muted; }
+    #manual-toolbar { height: 5; padding: 1 2; background: #101a22; }
+    #manual-topic { width: 34; margin-right: 1; }
+    #manual-toolbar-note { width: 1fr; padding: 1; color: $muted; }
+    #copy-manual { min-width: 14; }
+    Select { border: tall #385060; background: $surface; }
+    Select:focus { border: tall $brand; }
+    Button.-primary { background: $brand; color: #14202b; }
+    #manual-layout { height: 1fr; padding: 1 2; }
+    #manual-nav { width: 26; height: 1fr; margin-right: 1; padding: 1 2; background: $surface; border: round #385060; color: $muted; }
+    #manual-document { width: 1fr; height: 1fr; padding: 1 3; background: $surface; border: round #385060; }
+    #manual-content { height: auto; }
+    Footer { background: $surface; }
+    .narrow #manual-hero { height: 6; padding: 0 1; }
+    .narrow #manual-mark { width: 12; height: 5; padding-top: 0; }
+    .narrow #manual-brand { height: 5; padding-top: 0; }
+    .narrow #manual-toolbar { padding: 1; }
+    .narrow #manual-topic { width: 1fr; }
+    .narrow #manual-toolbar-note { display: none; }
+    .narrow #manual-layout { padding: 1; }
+    .narrow #manual-nav { display: none; }
+    .narrow #manual-document { width: 100%; padding: 1 2; }
+    """
+
+    BINDINGS = [
+        Binding("ctrl+c", "copy_manual", "Copy manual"),
+        Binding("escape", "quit", "Close"),
+        Binding("q", "quit", "Close"),
+    ]
+
+    def __init__(self, topic: str | None = None) -> None:
+        super().__init__()
+        self.topic = topic
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="manual-hero"):
+            yield Static(_textual_brand_mark(), id="manual-mark")
+            with Vertical(id="manual-brand"):
+                yield Static("G U A R D R A I L S", id="manual-wordmark")
+                yield Static("COMMAND MANUAL", id="manual-title")
+                yield Static("Clear workflows, flags, reports, and shortcuts", id="manual-subtitle")
+        with Horizontal(id="manual-toolbar"):
+            yield Select(
+                [("Overview", "overview"), *((name.title(), name) for name in TOPICS)],
+                value=self.topic or "overview",
+                allow_blank=False,
+                id="manual-topic",
+            )
+            yield Static("Choose a topic. Use Tab to move and Up/Down to read.", id="manual-toolbar-note")
+            yield Button("Copy manual", id="copy-manual", variant="primary")
+        with Horizontal(id="manual-layout"):
+            yield Static(
+                "[b #c9ff45]QUICK REFERENCE[/b #c9ff45]\n\n"
+                "scan       Start a security scan\n"
+                "report     Open or verify results\n"
+                "rules      Browse detections\n"
+                "metrics    Understand scoring\n"
+                "doctor     Check readiness\n\n"
+                "[b]Tip[/b]\nRun [#17aefd]guardrails help TOPIC[/#17aefd] to open a section directly.",
+                id="manual-nav",
+            )
+            with VerticalScroll(id="manual-document"):
+                yield Static(RichMarkdown(_rich_manual(manual(self.topic))), id="manual-content")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._set_responsive_state(self.size.width)
+
+    def on_resize(self, event: Resize) -> None:
+        self._set_responsive_state(event.size.width)
+
+    def _set_responsive_state(self, width: int) -> None:
+        self.screen.set_class(width < 90, "narrow")
+
+    @on(Select.Changed, "#manual-topic")
+    def topic_changed(self, event: Select.Changed) -> None:
+        selected = str(event.value)
+        self.topic = None if selected == "overview" else selected
+        self.query_one("#manual-content", Static).update(RichMarkdown(_rich_manual(manual(self.topic))))
+        self.query_one("#manual-document", VerticalScroll).scroll_home(animate=False)
+
+    @on(Button.Pressed, "#copy-manual")
+    def copy_button(self) -> None:
+        self.action_copy_manual()
+
+    def action_copy_manual(self) -> None:
+        self.copy_to_clipboard(manual(self.topic))
+        self.notify("Manual copied to the clipboard.", timeout=6)
 
 
 class PathScreen(ModalScreen[str | None]):
@@ -260,14 +368,49 @@ class GuardrailsApp(App[TuiResult | None]):
         border-left: thick $brand;
     }
 
+    #score-row { height: 6; margin-bottom: 1; }
+
+    .score-card {
+        width: 1fr;
+        height: 6;
+        margin-right: 1;
+        padding: 0 2;
+        background: $surface;
+        border: round #385060;
+    }
+
+    #report-workspace { height: 1fr; }
+
+    #result-table {
+        width: 2fr;
+        height: 1fr;
+        margin-right: 1;
+        background: $surface;
+        border: round #385060;
+    }
+
     #report-scroll {
+        width: 3fr;
         height: 1fr;
         padding: 1 2;
         background: $surface;
         border: round #385060;
     }
 
-    .markdown-content { height: auto; }
+    #report-detail, .markdown-content { height: auto; }
+
+    #export-receipt {
+        display: none;
+        height: 5;
+        margin-top: 1;
+        padding: 0 1;
+        background: $surface;
+        border-left: thick $cyan;
+    }
+
+    #export-status { width: 1fr; height: 4; padding: 1; color: $muted; }
+    #export-link { width: 24; height: 3; padding: 1; color: $cyan; }
+    #copy-export-path, #open-export { min-width: 13; }
 
     Footer { background: $surface; }
 
@@ -300,6 +443,14 @@ class GuardrailsApp(App[TuiResult | None]):
     .narrow #detail-pane { display: none; }
     .narrow #secondary-actions { padding: 0 1; }
     .narrow Button { min-width: 8; }
+    .results-mode.narrow #hero { display: none; }
+    .narrow #outcome-summary { height: 3; padding: 0 2; }
+    .narrow #score-row { height: 5; }
+    .narrow .score-card { height: 5; padding: 0 1; }
+    .narrow #report-workspace { layout: vertical; }
+    .narrow #result-table { width: 100%; height: 5; margin: 0 0 1 0; }
+    .narrow #report-scroll { width: 100%; height: 1fr; }
+    .narrow #export-link { display: none; }
     """
 
     BINDINGS = [
@@ -307,6 +458,7 @@ class GuardrailsApp(App[TuiResult | None]):
         Binding("ctrl+a", "scan_matches", "Scan matches", priority=True),
         Binding("/", "focus_search", "Search", priority=True),
         Binding("?", "help", "Help", priority=True),
+        Binding("ctrl+c", "copy_context", "Copy"),
         Binding("escape", "back", "Back"),
         Binding("q", "quit", "Quit"),
     ]
@@ -320,12 +472,13 @@ class GuardrailsApp(App[TuiResult | None]):
         self.raw_report: dict[str, Any] | None = None
         self.view_report: dict[str, Any] | None = None
         self.report_profile = "standard"
+        self.result_rows: dict[str, dict[str, Any]] = {}
+        self.last_export: Path | None = None
+        self.last_export_format = ""
 
     def compose(self) -> ComposeResult:
-        logo = compact_logo_lines()
-        mark = Text.from_ansi("\n".join(logo)) if logo else Text("GR", style="bold #c9ff45")
         with Horizontal(id="hero"):
-            yield Static(mark, id="brand-mark")
+            yield Static(_textual_brand_mark(), id="brand-mark")
             with Vertical(id="brand-copy"):
                 yield Static("G U A R D R A I L S", id="wordmark")
                 yield Static("LOCAL SCAN", id="product-name")
@@ -354,14 +507,27 @@ class GuardrailsApp(App[TuiResult | None]):
                 yield Static("Preparing scan…", id="progress-message")
         with Vertical(id="results-view"):
             yield Static("", id="outcome-summary")
-            with VerticalScroll(id="report-scroll"):
-                yield Static("", id="report-document", classes="markdown-content")
+            with Horizontal(id="score-row"):
+                yield Static("", id="risk-score", classes="score-card")
+                yield Static("", id="malware-score", classes="score-card")
+                yield Static("", id="coverage-score", classes="score-card")
+                yield Static("", id="finding-score", classes="score-card")
+            with Horizontal(id="report-workspace"):
+                yield DataTable(id="result-table", cursor_type="row", zebra_stripes=True)
+                with VerticalScroll(id="report-scroll"):
+                    yield Static("", id="report-detail")
             with Horizontal(id="report-actions"):
                 yield Button("Back", id="back-to-picker")
-                yield Button("HTML", id="export-html", variant="primary")
-                yield Button("ZIP", id="export-zip")
-                yield Button("JSON", id="export-json")
-                yield Button("Markdown", id="export-md")
+                yield Button("Save HTML", id="export-html", variant="primary")
+                yield Button("Save ZIP", id="export-zip")
+                yield Button("Save JSON", id="export-json")
+                yield Button("Save Markdown", id="export-md")
+                yield Button("Copy report", id="copy-report")
+            with Horizontal(id="export-receipt"):
+                yield Static("", id="export-status")
+                yield Link("Open exported report ↗", url="", id="export-link")
+                yield Button("Copy path", id="copy-export-path")
+                yield Button("Open", id="open-export")
         with Horizontal(id="secondary-actions"):
             yield Button("Scan file", id="scan-file")
             yield Button("Open report", id="open-report")
@@ -477,6 +643,17 @@ class GuardrailsApp(App[TuiResult | None]):
     def action_quit(self) -> None:
         self.exit(None)
 
+    def action_copy_context(self) -> None:
+        if self.view_report is not None and self.query_one("#results-view").display:
+            self.copy_to_clipboard(to_markdown(self.view_report))
+            self.notify("Complete report copied to the clipboard.", timeout=6)
+            return
+        listing = self.query_one("#extensions", SelectionList)
+        if listing.highlighted is not None and self.visible_rows:
+            row = self.visible_rows[listing.highlighted]
+            self.copy_to_clipboard(f"{row.get('extension_id')}@{row.get('version')}")
+            self.notify("Extension identity copied to the clipboard.", timeout=6)
+
     def action_scan_selected(self) -> None:
         rows = [row for row in self.rows if _row_key(row) in self.selected_keys]
         if not rows:
@@ -527,12 +704,57 @@ class GuardrailsApp(App[TuiResult | None]):
         decision = _overall_decision(view)
         summary = Text()
         summary.append(decision.upper(), style=f"bold {_decision_color(decision)}")
-        summary.append(f"  {_next_action(decision)}", style="#eef3f6")
+        summary.append("  ·  ", style="#8fa0ad")
+        summary.append(_next_action(decision), style="#eef3f6")
         self.query_one("#outcome-summary", Static).update(summary)
-        self.query_one("#report-document", Static).update(RichMarkdown(_report_details_markdown(view)))
+        extensions = _rank_report_extensions(view)
+        maximum_risk = max((int(item.get("risk_score") or 0) for item in extensions), default=0)
+        maximum_malware = max((int(item.get("malware_score") or 0) for item in extensions), default=0)
+        average_coverage = round(sum(_coverage(item) for item in extensions) / len(extensions)) if extensions else 0
+        finding_count = sum(len(item.get("findings") or []) for item in extensions)
+        self.query_one("#risk-score", Static).update(_gauge("RISK SCORE", maximum_risk, "#f5b942"))
+        self.query_one("#malware-score", Static).update(_gauge("MALWARE SCORE", maximum_malware, "#ff5a68"))
+        self.query_one("#coverage-score", Static).update(_gauge("COVERAGE", average_coverage, "#17aefd", suffix="%"))
+        self.query_one("#finding-score", Static).update(_finding_card(finding_count, len(extensions)))
+        self._populate_result_table(extensions)
+        self.query_one("#export-receipt").display = False
         self._show_view("results")
 
+    def _populate_result_table(self, extensions: list[dict[str, Any]]) -> None:
+        table = self.query_one("#result-table", DataTable)
+        table.clear(columns=True)
+        table.add_columns("Decision", "Extension", "Risk", "Findings")
+        self.result_rows = {}
+        for index, extension in enumerate(extensions):
+            key = f"result-{index}"
+            self.result_rows[key] = extension
+            decision = _extension_decision(extension)
+            label = Text(decision.upper(), style=f"bold {_decision_color(decision)}")
+            identity = f"{extension.get('extension_id', 'unknown')}@{extension.get('version', 'unknown')}"
+            table.add_row(
+                label,
+                identity,
+                f"{int(extension.get('risk_score') or 0)}/100",
+                str(len(extension.get("findings") or [])),
+                key=key,
+            )
+        if extensions:
+            table.move_cursor(row=0)
+            self._show_report_extension(extensions[0])
+        else:
+            self.query_one("#report-detail", Static).update("No extension result was recorded.")
+
+    @on(DataTable.RowHighlighted, "#result-table")
+    def result_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        extension = self.result_rows.get(str(event.row_key.value))
+        if extension:
+            self._show_report_extension(extension)
+
+    def _show_report_extension(self, extension: dict[str, Any]) -> None:
+        self.query_one("#report-detail", Static).update(_extension_report_text(extension))
+
     def _show_view(self, name: str) -> None:
+        self.screen.set_class(name == "results", "results-mode")
         self.query_one("#filters").display = name == "picker"
         self.query_one("#workspace").display = name == "picker"
         self.query_one("#secondary-actions").display = name == "picker"
@@ -550,6 +772,12 @@ class GuardrailsApp(App[TuiResult | None]):
             self._show_view("picker")
         elif button_id.startswith("export-"):
             self.export_current_report(button_id.removeprefix("export-"))
+        elif button_id == "copy-report":
+            self.action_copy_context()
+        elif button_id == "copy-export-path":
+            self._copy_export_path()
+        elif button_id == "open-export":
+            self._open_last_export()
         elif button_id == "scan-file":
             self.push_screen(PathScreen("Scan local extension", "VSIX, ZIP, or extension folder"), self._file_chosen)
         elif button_id == "open-report":
@@ -591,11 +819,67 @@ class GuardrailsApp(App[TuiResult | None]):
         except Exception as exc:
             self.call_from_thread(self.notify, f"Export failed: {exc}", severity="error", timeout=10)
             return
-        self.call_from_thread(self.notify, f"Saved {fmt.upper()} · {output}", severity="information", timeout=10)
+        self.call_from_thread(self._export_completed, fmt, output)
+
+    def _export_completed(self, fmt: str, output: Path) -> None:
+        self.last_export = output.resolve()
+        self.last_export_format = fmt
+        action = "Open report" if fmt == "html" else "Open folder"
+        self.query_one("#export-status", Static).update(
+            f"Saved {fmt.upper()}\n{self.last_export}"
+        )
+        link = self.query_one("#export-link", Link)
+        link.text = f"{action} ↗"
+        link.url = (self.last_export if fmt == "html" else self.last_export.parent).as_uri()
+        self.query_one("#open-export", Button).label = action
+        self.query_one("#export-receipt").display = True
+        self.notify(f"Saved to {self.last_export}", timeout=10)
+
+    def _copy_export_path(self) -> None:
+        if self.last_export is None:
+            self.notify("Export a report first.", severity="warning")
+            return
+        self.copy_to_clipboard(str(self.last_export))
+        self.notify("Export path copied to the clipboard.", timeout=6)
+
+    def _open_last_export(self) -> None:
+        if self.last_export is None:
+            self.notify("Export a report first.", severity="warning")
+            return
+        target = self.last_export if self.last_export_format == "html" else self.last_export.parent
+        self.open_url(target.as_uri())
 
 
 def launch(rows: list[dict[str, Any]]) -> TuiResult | None:
     return GuardrailsApp(rows).run()
+
+
+def launch_help(topic: str | None = None) -> None:
+    HelpApp(topic).run()
+
+
+def _textual_brand_mark() -> Text:
+    """Render the website mark directly with Rich colours, independent of shell ANSI detection."""
+    pixels = tuple(tuple(row[index] for index in range(0, len(row), 2)) for row in LOGO_PIXELS[::2])
+    mark = Text()
+    for row_index in range(0, len(pixels), 2):
+        if row_index:
+            mark.append("\n")
+        for top, bottom in zip(pixels[row_index], pixels[row_index + 1]):
+            if top and bottom:
+                mark.append("▀", style=f"{top} on {bottom}")
+            elif top:
+                mark.append("▀", style=top)
+            elif bottom:
+                mark.append("▄", style=bottom)
+            else:
+                mark.append(" ")
+    return mark
+
+
+def _rich_manual(source: str) -> str:
+    """Promote the manual's terminal-indented examples to Markdown code blocks."""
+    return "\n".join(f"  {line}" if line.startswith("  ") else line for line in source.splitlines())
 
 
 def _row_key(row: dict[str, Any]) -> str:
@@ -651,8 +935,148 @@ def _next_action(decision: str) -> str:
     }[decision]
 
 
-def _report_details_markdown(report: dict[str, Any]) -> str:
-    document = to_markdown(report)
-    marker = "## Decisions"
-    position = document.find(marker)
-    return document[position:] if position >= 0 else document
+def _rank_report_extensions(report: dict[str, Any]) -> list[dict[str, Any]]:
+    priority = {"allow": 1, "review": 2, "incomplete": 3, "block": 4}
+    extensions = [item for item in report.get("extensions", []) if isinstance(item, dict)]
+    return sorted(
+        extensions,
+        key=lambda item: (
+            priority[_extension_decision(item)],
+            int(item.get("malware_score") or 0),
+            int(item.get("risk_score") or 0),
+        ),
+        reverse=True,
+    )
+
+
+def _extension_decision(extension: dict[str, Any]) -> str:
+    value = str(extension.get("decision") or "").lower()
+    if value in {"allow", "review", "block", "incomplete"}:
+        return value
+    return {
+        "clean": "allow",
+        "review": "review",
+        "suspicious": "review",
+        "malicious": "block",
+    }.get(str(extension.get("verdict") or "").lower(), "incomplete")
+
+
+def _coverage(extension: dict[str, Any]) -> int:
+    if extension.get("coverage_percent") is not None:
+        return int(extension.get("coverage_percent") or 0)
+    detail = extension.get("analysis_coverage") if isinstance(extension.get("analysis_coverage"), dict) else {}
+    return int(detail.get("coverage_percent") or 0)
+
+
+def _gauge(label: str, value: int, gauge_color: str, *, suffix: str = "/100") -> Text:
+    bounded = max(0, min(100, int(value)))
+    filled = round(bounded / 10)
+    output = Text(label, style="bold #8fa0ad")
+    output.append("\n")
+    output.append("◜" + "━" * filled, style=f"bold {gauge_color}")
+    output.append("┄" * (10 - filled) + "◝", style="#385060")
+    output.append(f"\n{bounded}{suffix}", style=f"bold {gauge_color}")
+    return output
+
+
+def _finding_card(findings: int, extensions: int) -> Text:
+    output = Text("FINDINGS", style="bold #8fa0ad")
+    output.append(f"\n{findings}", style="bold #eef3f6")
+    output.append(f"\nacross {extensions} installation{'s' if extensions != 1 else ''}", style="#8fa0ad")
+    return output
+
+
+def _extension_report_text(extension: dict[str, Any]) -> Text:
+    decision = _extension_decision(extension)
+    extension_id = str(extension.get("extension_id") or "unknown")
+    version = str(extension.get("version") or "unknown")
+    client = str(extension.get("client") or extension.get("source") or "local")
+    reason = str(extension.get("decision_reason") or extension.get("verdict_reason") or "No explanation was recorded.")
+    artifact = extension.get("artifact_identity") if isinstance(extension.get("artifact_identity"), dict) else {}
+    artifact_sha = str(extension.get("artifact_sha256") or artifact.get("sha256") or extension.get("artifact_hash") or "unavailable")
+    risk = int(extension.get("risk_score") or 0)
+    malware = int(extension.get("malware_score") or 0)
+    coverage = _coverage(extension)
+
+    output = Text()
+    output.append(f"{extension_id}@{version}\n", style="bold #eef3f6")
+    output.append(f"{decision.upper()}  ", style=f"bold {_decision_color(decision)}")
+    output.append(f"{client}  ·  coverage {coverage}%\n", style="#8fa0ad")
+    output.append("WHY THIS RESULT\n", style="bold #c9ff45")
+    output.append(reason + "\n\n", style="#eef3f6")
+
+    output.append("SECURITY SCORES\n", style="bold #c9ff45")
+    output.append(_inline_bar("Risk priority", risk, "#f5b942"))
+    output.append("\n")
+    output.append(_inline_bar("Malware evidence", malware, "#ff5a68"))
+    output.append("\n")
+    output.append(_inline_bar("Analysis coverage", coverage, "#17aefd", suffix="%"))
+    output.append("\n\n")
+
+    coverage_detail = extension.get("analysis_coverage") if isinstance(extension.get("analysis_coverage"), dict) else {}
+    providers = coverage_detail.get("providers") if isinstance(coverage_detail.get("providers"), dict) else {}
+    output.append("PROVIDER COVERAGE\n", style="bold #c9ff45")
+    if providers:
+        for name, raw_detail in providers.items():
+            detail = raw_detail if isinstance(raw_detail, dict) else {}
+            status = str(detail.get("status") or "unknown")
+            required = "required" if detail.get("required") else "optional"
+            provider = {
+                "native_static": "Native static",
+                "javascript_ast": "JavaScript AST",
+                "dependency_intelligence": "Dependency advisories",
+            }.get(str(name), str(name).replace("_", " ").title())
+            status_color = "#47c978" if status == "completed" else "#ff5a68" if required == "required" else "#f5b942"
+            output.append("● ", style=status_color)
+            output.append(f"{provider}: {status}", style="#eef3f6")
+            output.append(f"  {required}\n", style="#8fa0ad")
+    else:
+        output.append("Provider detail was not recorded.\n", style="#8fa0ad")
+
+    findings = [item for item in extension.get("findings", []) if isinstance(item, dict)]
+    output.append(f"\nFINDINGS ({len(findings)})\n", style="bold #c9ff45")
+    if not findings:
+        output.append("No findings were reported for this artifact.\n", style="#47c978")
+    for index, finding in enumerate(_rank_findings(findings), start=1):
+        severity = str(finding.get("severity") or "INFO").upper()
+        rule = str(finding.get("rule_id") or "unknown-rule")
+        summary = str(finding.get("evidence_summary") or "No evidence summary was recorded.")
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+        evidence_class = str(finding.get("evidence_class") or evidence.get("evidence_class") or "unknown")
+        references = [str(value) for value in finding.get("file_refs", []) if value]
+        output.append(f"\n{index}. {severity}  ", style=f"bold {_severity_color(severity)}")
+        output.append(rule + "\n", style="bold #eef3f6")
+        output.append(summary + "\n", style="#eef3f6")
+        output.append(f"Evidence: {evidence_class}", style="#8fa0ad")
+        if references:
+            output.append(f"  ·  {references[0]}", style="#17aefd")
+        output.append("\n")
+
+    output.append("\nARTIFACT IDENTITY\n", style="bold #c9ff45")
+    output.append(f"SHA-256  {artifact_sha}\n", style="#8fa0ad")
+    return output
+
+
+def _inline_bar(label: str, value: int, bar_color: str, *, suffix: str = "/100") -> Text:
+    bounded = max(0, min(100, int(value)))
+    filled = round(bounded / 5)
+    output = Text(f"{label:<18} ", style="#8fa0ad")
+    output.append("█" * filled, style=bar_color)
+    output.append("░" * (20 - filled), style="#385060")
+    output.append(f"  {bounded}{suffix}", style=f"bold {bar_color}")
+    return output
+
+
+def _rank_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    priority = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1}
+    return sorted(findings, key=lambda item: priority.get(str(item.get("severity") or "INFO").upper(), 0), reverse=True)
+
+
+def _severity_color(severity: str) -> str:
+    return {
+        "CRITICAL": "#ff5a68",
+        "HIGH": "#ff5a68",
+        "MEDIUM": "#f5b942",
+        "LOW": "#17aefd",
+        "INFO": "#8fa0ad",
+    }.get(severity, "#8fa0ad")

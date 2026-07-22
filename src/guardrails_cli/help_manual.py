@@ -41,6 +41,8 @@ Insiders without executing extension code.
 
 Run `guardrails COMMAND --help` for every flag accepted by a command.
 Run `guardrails help shortcuts` for interactive controls.
+Interactive help opens as a terminal application; piped help remains plain text
+so it works with files, scripts, and shell tools.
 """
 
 
@@ -77,6 +79,10 @@ Formats:
   zip        Canonical verifiable evidence bundle
   json       Automation and integrations
   md         Documentation and review notes
+
+Interactive exports are saved in the directory where Guardrails was started.
+After saving, the result screen shows the complete absolute path and provides
+Copy path plus Open report/Open folder actions.
 
 Examples:
 
@@ -129,6 +135,7 @@ Exit codes:
   /             Focus search
   Ctrl+S        Scan selected extensions
   Ctrl+A        Scan every visible match after confirmation
+  Ctrl+C        Copy the complete report, or the highlighted extension identity
   ?             Open the help manual
   Escape        Close a dialog or return to extension selection
   Q             Quit when focus is outside a text field

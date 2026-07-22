@@ -379,7 +379,14 @@ def cmd_metrics(args: argparse.Namespace) -> int:
 
 
 def cmd_help(args: argparse.Namespace) -> int:
-    print(manual(args.topic), end="")
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            from .tui import launch_help
+        except ImportError as exc:
+            raise ValueError("The interactive UI dependency is missing. Reinstall Guardrails to restore the manual.") from exc
+        launch_help(args.topic)
+    else:
+        print(manual(args.topic), end="")
     return 0
 
 
