@@ -80,7 +80,9 @@ def engine_identity() -> dict[str, str]:
     if direct_url:
         try:
             parsed = json.loads(direct_url)
-            build = str((parsed.get("vcs_info") or {}).get("commit_id") or "unknown")
+            commit_id = (parsed.get("vcs_info") or {}).get("commit_id")
+            if commit_id:
+                build = str(commit_id)
         except json.JSONDecodeError:
             pass
     return {"version": str(package.version or "unknown"), "build": build}
