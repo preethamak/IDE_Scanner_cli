@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "guardlens"
-version = "0.3.2"
+version = "0.3.3"
 description = "Guardrails CLI for scanning locally installed extensions."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,7 +13,6 @@ license-files = ["LICENSE"]
 authors = [{ name = "Preetham AK" }]
 maintainers = [{ name = "Preetham AK" }]
 dependencies = [
-  "guardlens-core==0.1.1",
   "textual>=8.2.8,<9",
 ]
 classifiers = [
@@ -38,10 +37,11 @@ Website = "https://ide-scanner.vercel.app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["guardrails_cli*"]
+include = ["guardrails_cli*", "ide_scanner*"]
 
 [tool.setuptools.package-data]
 guardrails_cli = ["assets/*.png"]
+ide_scanner = ["js_ast/*.js", "js_ast/*LICENSE*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

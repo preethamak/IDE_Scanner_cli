@@ -1,7 +1,8 @@
 # Guardrails CLI
 
 Scan extensions installed in VS Code, Cursor, Windsurf, VSCodium, and VS Code
-Insiders without executing extension code.
+Insiders without executing extension code. The CLI and scanner runtime are
+distributed together as one package.
 
 ## Install
 

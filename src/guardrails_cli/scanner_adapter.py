@@ -67,7 +67,7 @@ def get_rules() -> dict[str, Any]:
 
 def engine_identity() -> dict[str, str]:
     package = None
-    for distribution_name in ("guardlens-core", "ide-scanner"):
+    for distribution_name in ("guardlens", "ide-scanner"):
         try:
             package = distribution(distribution_name)
             break
