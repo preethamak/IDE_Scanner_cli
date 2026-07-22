@@ -6,7 +6,13 @@ Scan extensions installed in VS Code, Cursor, Windsurf, VSCodium, and VS Code In
 
 Guardrails analyzes a private temporary snapshot of each selected installation. Extension code is not executed, and files remain on the machine unless a report is explicitly exported.
 
-## Install from GitHub
+## Install
+
+```bash
+pipx install guardlens
+```
+
+Or install the development version from GitHub:
 
 ```bash
 pipx install "git+https://github.com/preethamak/IDE_Scanner_cli.git"
@@ -70,7 +76,7 @@ guardrails scan --marketplace publisher.extension@1.2.3
 Install the optional local analyzers with:
 
 ```bash
-pipx inject guardrails-ide-scanner semgrep yara-python
+pipx inject guardlens semgrep yara-python
 ```
 
 ## Reports
