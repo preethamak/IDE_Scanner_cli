@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from guardrails_cli.presentation import severity_detail
+
 from ._atomic import write_text
 
 
@@ -88,7 +90,7 @@ def _extension_markdown(extension: dict[str, Any]) -> list[str]:
         evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
         lines.append(
             "| {severity} | `{rule}` | {klass} | {summary} |".format(
-                severity=_clean(finding.get("severity", "")),
+                severity=_clean(severity_detail(finding)),
                 rule=_clean(finding.get("rule_id", "")),
                 klass=_clean(finding.get("evidence_class") or evidence.get("evidence_class") or "unknown"),
                 summary=_clean(finding.get("evidence_summary", "")),

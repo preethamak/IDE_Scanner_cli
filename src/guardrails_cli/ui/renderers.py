@@ -4,6 +4,7 @@ import textwrap
 from typing import Any
 
 from guardrails_cli import __version__
+from guardrails_cli.presentation import finding_severity, severity_detail
 
 from .panels import banner, panel, section
 from .tables import key_values, table, terminal_width, truncate
@@ -147,10 +148,10 @@ def render_provider_coverage(extension: dict[str, Any]) -> str:
 
 
 def render_findings(findings: list[dict[str, Any]]) -> str:
-    ranked = sorted(findings, key=lambda item: (SEVERITY_RANK.get(str(item.get("severity") or "INFO").upper(), 0), _confidence(item.get("confidence"))), reverse=True)
+    ranked = sorted(findings, key=lambda item: (SEVERITY_RANK.get(finding_severity(item), 0), _confidence(item.get("confidence"))), reverse=True)
     lines = [section("Highest-priority evidence")]
     for finding in ranked[:10]:
-        severity = str(finding.get("severity") or "INFO")
+        severity = severity_detail(finding)
         rule = str(finding.get("rule_id") or "unknown-rule")
         summary = str(finding.get("evidence_summary") or "No summary recorded.")
         evidence_class = str(finding.get("evidence_class") or _evidence_class(finding))

@@ -13,9 +13,33 @@ from guardrails_cli.report_reader import report_view, validate_report
 from guardrails_cli.exporters.html import to_html
 from guardrails_cli.exporters.markdown import to_markdown
 from guardrails_cli.scanner_adapter import write_bundle
+from guardrails_cli.ui.renderers import render_findings
 
 
 class GuardrailsReportTests(unittest.TestCase):
+    def test_findings_present_policy_severity_consistently(self) -> None:
+        finding = {
+            "rule_id": "lifecycle-script",
+            "severity": "MEDIUM",
+            "effective_severity": "INFO",
+            "evidence_class": "contextual",
+            "evidence_summary": "Expected package lifecycle behavior.",
+        }
+        report = {
+            "summary": {"decision_counts": {"allow": 1, "review": 0, "block": 0, "incomplete": 0}},
+            "extensions": [{
+                "extension_id": "fixture.extension",
+                "version": "1.0.0",
+                "decision": "allow",
+                "severity": "INFO",
+                "findings": [finding],
+            }],
+        }
+
+        self.assertIn("INFO (DETECTOR: MEDIUM)", render_findings([finding]))
+        self.assertIn("INFO (detector: MEDIUM)", to_markdown(report))
+        self.assertIn("INFO (detector: MEDIUM)", to_html(report))
+
     def test_empty_json_is_not_a_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "empty.json"

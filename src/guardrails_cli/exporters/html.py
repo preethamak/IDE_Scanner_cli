@@ -6,6 +6,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
+from guardrails_cli.presentation import severity_detail
+
 from ._atomic import write_text
 
 
@@ -58,7 +60,7 @@ def _extension_html(extension: dict[str, Any]) -> str:
     sha = extension.get("artifact_sha256") or artifact.get("sha256") or extension.get("artifact_hash") or "unavailable"
     findings = [item for item in extension.get("findings", []) if isinstance(item, dict)]
     finding_rows = "".join(
-        f"<tr><td>{_escape(item.get('severity',''))}</td><td><code>{_escape(item.get('rule_id',''))}</code></td><td>{_escape(item.get('evidence_class') or 'unknown')}</td><td>{_escape(item.get('evidence_summary',''))}</td></tr>"
+        f"<tr><td>{_escape(severity_detail(item))}</td><td><code>{_escape(item.get('rule_id',''))}</code></td><td>{_escape(item.get('evidence_class') or 'unknown')}</td><td>{_escape(item.get('evidence_summary',''))}</td></tr>"
         for item in findings[:50]
     ) or '<tr><td colspan="4">No findings reported.</td></tr>'
     reason = extension.get("decision_reason") or extension.get("verdict_reason") or "No explanation was recorded."

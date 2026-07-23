@@ -6,6 +6,7 @@ from typing import Any
 
 from rich.markdown import Markdown as RichMarkdown
 from rich.text import Text
+from guardrails_cli.presentation import finding_severity, severity_detail
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -1050,13 +1051,14 @@ def _extension_report_text(extension: dict[str, Any]) -> Text:
     if not findings:
         output.append("No findings were reported for this artifact.\n", style="#47c978")
     for index, finding in enumerate(_rank_findings(findings), start=1):
-        severity = str(finding.get("severity") or "INFO").upper()
+        effective_severity = finding_severity(finding)
+        severity = severity_detail(finding)
         rule = str(finding.get("rule_id") or "unknown-rule")
         summary = str(finding.get("evidence_summary") or "No evidence summary was recorded.")
         evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
         evidence_class = str(finding.get("evidence_class") or evidence.get("evidence_class") or "unknown")
         references = [str(value) for value in finding.get("file_refs", []) if value]
-        output.append(f"\n{index}. {severity}  ", style=f"bold {_severity_color(severity)}")
+        output.append(f"\n{index}. {severity}  ", style=f"bold {_severity_color(effective_severity)}")
         output.append(rule + "\n", style="bold #eef3f6")
         output.append(summary + "\n", style="#eef3f6")
         output.append(f"Evidence: {evidence_class}", style="#8fa0ad")
@@ -1081,7 +1083,7 @@ def _inline_bar(label: str, value: int, bar_color: str, *, suffix: str = "/100")
 
 def _rank_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     priority = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1}
-    return sorted(findings, key=lambda item: priority.get(str(item.get("severity") or "INFO").upper(), 0), reverse=True)
+    return sorted(findings, key=lambda item: priority.get(finding_severity(item), 0), reverse=True)
 
 
 def _severity_color(severity: str) -> str:
