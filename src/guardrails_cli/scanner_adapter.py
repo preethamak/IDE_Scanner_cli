@@ -2,19 +2,58 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import tempfile
 import zipfile
 from importlib.metadata import PackageNotFoundError, distribution
-from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
-import ide_scanner
-
 from guardrails_cli import __version__
+
+
+def _engine_manifest() -> dict[str, Any]:
+    try:
+        return json.loads(Path(__file__).with_name("engine_source.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        raise RuntimeError(f"Bundled scanner identity is unreadable: {exc}") from exc
+
+
+def _engine_root() -> Path:
+    spec = importlib.util.find_spec("ide_scanner")
+    if spec is None or spec.origin is None:
+        raise RuntimeError("Bundled scanner package is unavailable.")
+    return Path(spec.origin).resolve().parent
+
+
+def verify_engine_integrity(engine_root: Path | None = None) -> None:
+    source = _engine_manifest()
+    expected = source.get("files")
+    if not isinstance(expected, dict) or not expected:
+        raise RuntimeError("Bundled scanner identity contains no file hashes.")
+    root = engine_root or _engine_root()
+    for relative, expected_hash in sorted(expected.items()):
+        path = Path(str(relative))
+        if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+            raise RuntimeError(f"Bundled scanner identity contains an unsafe path: {relative!r}")
+        target = root / path
+        try:
+            actual_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise RuntimeError(f"Bundled scanner file is unavailable: {relative}") from exc
+        if actual_hash != expected_hash:
+            raise RuntimeError(
+                f"Bundled scanner integrity check failed for {relative}. "
+                "Reinstall Guardrails before scanning."
+            )
+
+
+# Verify package bytes before importing any scanner module. An integrity guard
+# that runs after import is too late because module-level code has already run.
+verify_engine_integrity()
 
 from ide_scanner.discovery import discover_from_path, discover_local_installations
 from ide_scanner.registry import search_marketplace_extensions
@@ -75,31 +114,6 @@ def get_rules() -> dict[str, Any]:
     return rules_json()
 
 
-def verify_engine_integrity(engine_root: Path | None = None) -> None:
-    try:
-        source = json.loads(files("guardrails_cli").joinpath("engine_source.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError) as exc:
-        raise RuntimeError(f"Bundled scanner identity is unreadable: {exc}") from exc
-    expected = source.get("files")
-    if not isinstance(expected, dict) or not expected:
-        raise RuntimeError("Bundled scanner identity contains no file hashes.")
-    root = engine_root or Path(ide_scanner.__file__).resolve().parent
-    for relative, expected_hash in sorted(expected.items()):
-        path = Path(str(relative))
-        if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
-            raise RuntimeError(f"Bundled scanner identity contains an unsafe path: {relative!r}")
-        target = root / path
-        try:
-            actual_hash = hashlib.sha256(target.read_bytes()).hexdigest()
-        except OSError as exc:
-            raise RuntimeError(f"Bundled scanner file is unavailable: {relative}") from exc
-        if actual_hash != expected_hash:
-            raise RuntimeError(
-                f"Bundled scanner integrity check failed for {relative}. "
-                "Reinstall Guardrails before scanning."
-            )
-
-
 def engine_identity() -> dict[str, str]:
     package = None
     for distribution_name in ("guardlens", "ide-scanner"):
@@ -112,7 +126,7 @@ def engine_identity() -> dict[str, str]:
         return {"version": "unknown", "build": "unknown"}
     build = f"pypi:{package.version}"
     try:
-        source = json.loads(files("guardrails_cli").joinpath("engine_source.json").read_text(encoding="utf-8"))
+        source = _engine_manifest()
         revision = str(source.get("source_revision") or "")
         if re.fullmatch(r"[0-9a-f]{40}", revision):
             build = revision

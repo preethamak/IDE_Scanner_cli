@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -30,6 +33,28 @@ class EngineParityTests(unittest.TestCase):
                 handle.write("\n# unexpected overwrite\n")
             with self.assertRaisesRegex(RuntimeError, "integrity check failed"):
                 verify_engine_integrity(copied_root)
+
+    def test_engine_is_verified_before_scanner_modules_are_imported(self) -> None:
+        source_root = Path(__file__).parents[1] / "src"
+        with tempfile.TemporaryDirectory() as directory:
+            copied_source = Path(directory) / "src"
+            copied_source.mkdir()
+            shutil.copytree(source_root / "guardrails_cli", copied_source / "guardrails_cli")
+            shutil.copytree(source_root / "ide_scanner", copied_source / "ide_scanner")
+            with (copied_source / "ide_scanner" / "__init__.py").open("a", encoding="utf-8") as handle:
+                handle.write("\nraise RuntimeError('scanner module executed before verification')\n")
+            environment = {**os.environ, "PYTHONPATH": str(copied_source)}
+            result = subprocess.run(
+                [sys.executable, "-c", "import guardrails_cli.scanner_adapter"],
+                capture_output=True,
+                text=True,
+                env=environment,
+                check=False,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("integrity check failed", result.stderr)
+        self.assertNotIn("scanner module executed before verification", result.stderr)
 
     def test_cli_bundle_preserves_canonical_engine_classification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
