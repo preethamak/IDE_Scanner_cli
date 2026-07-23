@@ -357,22 +357,22 @@ class GuardrailsApp(App[TuiResult | None]):
     #results-view {
         display: none;
         height: 1fr;
-        padding: 1 2;
+        padding: 0 2;
     }
 
     #outcome-summary {
-        height: 4;
-        padding: 1 2;
+        height: 3;
+        padding: 0 2;
         margin-bottom: 1;
         background: $surface;
         border-left: thick $brand;
     }
 
-    #score-row { height: 6; margin-bottom: 1; }
+    #score-row { height: 5; margin-bottom: 1; }
 
     .score-card {
         width: 1fr;
-        height: 6;
+        height: 5;
         margin-right: 1;
         padding: 0 2;
         background: $surface;
@@ -432,6 +432,7 @@ class GuardrailsApp(App[TuiResult | None]):
     .dialog-actions { height: 3; margin-top: 1; align-horizontal: right; }
     #help-document { height: 1fr; }
 
+    .results-mode #hero { display: none; }
     .narrow #hero { height: 6; padding: 0 1; }
     .narrow #brand-mark { width: 12; height: 5; padding-top: 0; }
     .narrow #brand-copy { height: 5; padding-top: 0; }
@@ -443,7 +444,6 @@ class GuardrailsApp(App[TuiResult | None]):
     .narrow #detail-pane { display: none; }
     .narrow #secondary-actions { padding: 0 1; }
     .narrow Button { min-width: 8; }
-    .results-mode.narrow #hero { display: none; }
     .narrow #outcome-summary { height: 3; padding: 0 2; }
     .narrow #score-row { height: 5; }
     .narrow .score-card { height: 5; padding: 0 1; }
