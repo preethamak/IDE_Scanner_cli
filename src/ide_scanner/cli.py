@@ -31,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("--online", action="store_true", help="Enable registry and dependency vulnerability checks.")
     scan.add_argument("--known-bad-hashes", help="JSON or line-based SHA-256 feed for known malicious artifacts.")
     scan.add_argument("--threat-feed", help="JSON feed of known malicious or suspicious extension ids.")
+    scan.add_argument("--extension-advisories", help="Versioned JSON feed of exact extension vulnerability advisories. Defaults to the bundled snapshot.")
     scan.add_argument("--sandbox-observations", help="JSON observations from an external sandbox run. The scanner imports this evidence but does not execute extensions.")
     scan.add_argument("--previous-report", help="Previous ide-scanner JSON report to compare versions, dependencies, scores, and artifacts.")
     scan.add_argument("--out", "--output", dest="output", help="Write report to this file.")
@@ -94,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
             online=args.online or args.profile in {"deep"},
             known_bad_hashes_file=args.known_bad_hashes,
             threat_feed_file=args.threat_feed,
+            extension_advisories_file=args.extension_advisories,
             sandbox_observations_file=args.sandbox_observations,
             previous_report_file=args.previous_report,
         )
@@ -230,18 +232,20 @@ def _emit_terminal_brief(report: dict[str, Any]) -> None:
     print(f"{len(extensions)} extension(s) assessed")
     for extension in extensions:
         extension_id = str(extension.get("extension_id") or extension.get("name") or "unknown extension")
-        decision = str(extension.get("decision") or "incomplete").upper()
+        status = str(extension.get("analysis_status") or "incomplete").lower()
+        decision = str(extension.get("decision") or "incomplete").upper() if status == "complete" else f"NO DECISION ({status.upper()})"
         risk = int(extension.get("risk_score") or 0)
         malware = int(extension.get("malware_score") or 0)
         coverage = extension.get("analysis_coverage") if isinstance(extension.get("analysis_coverage"), dict) else {}
         percent = int(coverage.get("coverage_percent") or 0)
         print(f"\n{extension_id}  {decision}")
-        print(f"  Review priority {risk}/100 | Malware evidence {malware}/100 | Coverage {percent}%")
+        severity = str(extension.get("severity") or "INFO")
+        print(f"  Evidence severity {severity} | Review priority {risk}/100 | Malware evidence {malware}/100 | Coverage {percent}%")
         reason = str(extension.get("decision_reason") or extension.get("verdict_reason") or "No decision explanation recorded.")
         print(f"  {reason}")
         findings = [item for item in extension.get("findings", []) if isinstance(item, dict)]
         for finding in findings[:3]:
-            severity = str(finding.get("severity") or "INFO")
+            severity = str(finding.get("effective_severity") or finding.get("severity") or "INFO")
             summary = str(finding.get("evidence_summary") or finding.get("rule_id") or "Scanner observation")
             refs = finding.get("file_refs") if isinstance(finding.get("file_refs"), list) else []
             location = f" · {refs[0]}" if refs else ""

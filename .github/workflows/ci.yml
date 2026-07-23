@@ -22,5 +22,6 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e .
+      - run: python scripts/sync_vendored_engine.py --check
       - run: python -m unittest discover -s tests -v
       - run: guardrails --help

@@ -7,6 +7,7 @@ import re
 import tempfile
 import zipfile
 from importlib.metadata import PackageNotFoundError, distribution
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -76,8 +77,15 @@ def engine_identity() -> dict[str, str]:
     if package is None:
         return {"version": "unknown", "build": "unknown"}
     build = f"pypi:{package.version}"
+    try:
+        source = json.loads(files("guardrails_cli").joinpath("engine_source.json").read_text(encoding="utf-8"))
+        revision = str(source.get("source_revision") or "")
+        if re.fullmatch(r"[0-9a-f]{40}", revision):
+            build = revision
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
     direct_url = package.read_text("direct_url.json")
-    if direct_url:
+    if direct_url and build.startswith("pypi:"):
         try:
             parsed = json.loads(direct_url)
             commit_id = (parsed.get("vcs_info") or {}).get("commit_id")
@@ -180,6 +188,7 @@ def display_report(report: dict[str, Any], *, source: str = "cli", profile: str 
     extensions = [item for item in report.get("extensions", []) if isinstance(item, dict)]
     summary = dict(report.get("summary") or {})
     engine = engine_identity()
+    catalog = rules_json()
     return {
         "scan_id": report.get("scan_id", "unknown"),
         "created_at": report.get("created_at", ""),
@@ -189,7 +198,8 @@ def display_report(report: dict[str, Any], *, source: str = "cli", profile: str 
             "scanner_version": engine["version"],
             "scanner_build": os.environ.get("IDE_SCANNER_BUILD_SHA", "").strip() or engine["build"],
             "cli_version": __version__,
-            "ruleset_version": rules_json().get("ruleset_version", "unknown"),
+            "ruleset_version": report.get("ruleset_version") or catalog.get("ruleset_version", "unknown"),
+            "policy_version": report.get("policy_version") or catalog.get("policy_version", "unknown"),
             "profile": profile,
             "source": source,
         },

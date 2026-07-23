@@ -11,11 +11,26 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from .ast_analyzer import JS_AST_EXTS, analyze_js_source_status, node_available
+from .ast_analyzer import (
+    JS_AST_EXTS,
+    JS_AST_MAX_OLD_SPACE_MB,
+    JS_AST_TIMEOUT_ATTEMPTS,
+    JS_AST_TIMEOUT_SECONDS,
+    analyze_js_source_status,
+    node_available,
+)
+from .classification_policy import (
+    POLICY_VERSION,
+    effective_finding_severity,
+    finding_actionability,
+    is_decision_relevant,
+    is_review_relevant,
+)
 from .discovery import discover_from_path, discover_local_installations
 from .jsonc import loads_jsonc
 from .models import ExtensionReport, Finding
 from .public_outcomes import apply_public_assessment
+from .rule_registry import RULESET_VERSION
 from .posture import scan_posture, summarize_posture
 from .providers import run_static_providers
 from .registry import (
@@ -65,7 +80,10 @@ MAX_TEXT_BYTES = 64 * 1024 * 1024
 MAX_SOURCE_PREVIEW_BYTES = 200 * 1024
 MAX_SOURCE_PREVIEWS = 40
 GENERATED_BLOB_BYTES = 10 * 1024 * 1024
-MINIFIED_BLOB_BYTES = 1024 * 1024
+# Generated webpack/esbuild output can be substantially smaller than 1 MiB.
+# Treat a long, nearly line-free JavaScript artifact as generated once it is
+# large enough that character proximity no longer represents source locality.
+MINIFIED_BLOB_BYTES = 256 * 1024
 MAX_ARCHIVE_FILES = 100_000
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_ARCHIVE_COMPRESSION_RATIO = 100
@@ -204,6 +222,7 @@ def scan_targets(
     online: bool = False,
     known_bad_hashes_file: Path | str | None = None,
     threat_feed_file: Path | str | None = None,
+    extension_advisories_file: Path | str | None = None,
     sandbox_observations_file: Path | str | None = None,
     previous_report_file: Path | str | None = None,
     include_posture: bool = True,
@@ -233,6 +252,8 @@ def scan_targets(
         for identifier in marketplace_scan_ids or []
     )
     _apply_threat_feed(extensions, _load_threat_feed(threat_feed_file))
+    advisory_bundle = _load_extension_advisories(extension_advisories_file)
+    _apply_extension_advisories(extensions, advisory_bundle)
     _apply_sandbox_observations(extensions, _load_sandbox_observations(sandbox_observations_file))
     registry = enrich_registry(extensions, online=online)
     _apply_registry_findings(extensions, registry["findings"])
@@ -257,6 +278,14 @@ def scan_targets(
             "error_count": len(dependency_errors),
             "required": False,
         }
+        providers["extension_advisories"] = {
+            "provider": "extension_advisories",
+            "status": str(advisory_bundle.get("status") or "unavailable"),
+            "snapshot_version": str(advisory_bundle.get("snapshot_version") or "unavailable"),
+            "sha256": str(advisory_bundle.get("sha256") or ""),
+            "error_count": 0 if advisory_bundle.get("status") == "completed" else 1,
+            "required": True,
+        }
         _finalize_analysis_coverage(extension.analysis_coverage)
         extension.artifact_inventory["analysis_coverage"] = extension.analysis_coverage
         extension.artifact_inventory["scan_incomplete"] = extension.analysis_coverage["status"] != "complete"
@@ -268,7 +297,20 @@ def scan_targets(
         # ingestion all serialize the same canonical assessment.
         _apply_security_decision(extension)
         apply_public_assessment(extension)
-    return _build_report(extensions, registry, _load_previous_report(previous_report_file), include_posture=include_posture)
+    intelligence = {
+        "extension_advisories": {
+            "status": str(advisory_bundle.get("status") or "unavailable"),
+            "snapshot_version": str(advisory_bundle.get("snapshot_version") or "none"),
+            "sha256": str(advisory_bundle.get("sha256") or ""),
+        }
+    }
+    return _build_report(
+        extensions,
+        registry,
+        _load_previous_report(previous_report_file),
+        include_posture=include_posture,
+        intelligence=intelligence,
+    )
 
 
 def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[str, dict[str, Any]] | None = None) -> ExtensionReport:
@@ -283,6 +325,7 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
     executable_sources: list[tuple[str, str]] = []
     source_previews: list[dict[str, Any]] = []
     js_ast_statuses: list[str] = []
+    js_ast_failed_paths: list[str] = []
     ast_unparsed_entrypoints: list[str] = []
 
     _add_manifest_findings(extension_id, version, manifest, findings, capabilities)
@@ -295,7 +338,18 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
     _add_artifact_inventory_findings(extension_id, version, artifact_inventory, known_bad_hashes or {}, findings, capabilities, path)
     _add_repository_posture_findings(extension_id, version, manifest, path, findings, artifact_inventory)
 
-    for file in files:
+    # Analyze declared activation paths first. Besides making the security-
+    # critical path explicit, this prevents hundreds of auxiliary-file
+    # findings from consuming the memory headroom needed by AST analysis of a
+    # large bundled entrypoint. Inventory order remains untouched.
+    analysis_files = sorted(
+        files,
+        key=lambda candidate: (
+            candidate.relative_to(path).as_posix() not in entrypoints,
+            candidate.relative_to(path).as_posix(),
+        ),
+    )
+    for file in analysis_files:
         rel = file.relative_to(path).as_posix()
         suffix = file.suffix.lower()
         is_entrypoint = rel in entrypoints
@@ -324,19 +378,32 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
                 "truncated": False,
             })
         scanned_files += 1
-        if suffix in EXEC_TEXT_EXTS:
-            analysis_coverage["analyzed_executable_files"].append(rel)
-            executable_sources.append((rel, text))
-            _add_code_findings(extension_id, version, rel, text, findings, capabilities)
+        # Run the bounded AST subprocess before expanding raw-text matches into
+        # Python Finding objects. Large bundled entrypoints can otherwise push
+        # the parent close to the container memory limit and starve Node's GC,
+        # turning identical source into a resource-dependent timeout.
         if suffix in JS_AST_EXTS:
             generated_blob = _is_generated_code_blob(rel, text)
             if is_entrypoint or not generated_blob:
                 status = _add_ast_findings(extension_id, version, rel, text, findings, generated=generated_blob)
                 js_ast_statuses.append(status)
+                if status not in ("ok", "unparsed"):
+                    js_ast_failed_paths.append(rel)
                 if is_entrypoint and status == "unparsed":
                     ast_unparsed_entrypoints.append(rel)
+        if suffix in EXEC_TEXT_EXTS:
+            analysis_coverage["analyzed_executable_files"].append(rel)
+            executable_sources.append((rel, text))
+            _add_code_findings(extension_id, version, rel, text, findings, capabilities)
         if suffix in EXEC_TEXT_EXTS or suffix in {".html", ".htm"}:
-            _add_webview_csp_findings(extension_id, version, rel, text, findings)
+            _add_webview_csp_findings(
+                extension_id,
+                version,
+                rel,
+                text,
+                findings,
+                report_missing=not (suffix in JS_AST_EXTS and _is_generated_code_blob(rel, text)),
+            )
 
     _add_workspace_cli_path_findings(extension_id, version, manifest, executable_sources, findings)
 
@@ -370,7 +437,7 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
     findings = _dedupe_findings(findings)
     analysis_coverage["providers"] = {
         "native_static": {"provider": "native_static", "status": "completed", "required": True},
-        "javascript_ast": _javascript_ast_provider_status(js_ast_statuses),
+        "javascript_ast": _javascript_ast_provider_status(js_ast_statuses, js_ast_failed_paths),
         **provider_statuses,
     }
     analysis_coverage["manifest_validation"] = {
@@ -1223,16 +1290,12 @@ def _add_artifact_inventory_findings(
 
 
 def _has_origin_evidence(path: Path | None, rel: str, all_paths: set[str]) -> bool:
-    companions = {f"{rel}.sha256", f"{rel}.sig", f"{rel}.asc", f"{rel}.p7s"}
-    if companions & all_paths:
-        return True
-    if path is None:
-        return False
-    stem = rel.rsplit("/", 1)[-1]
-    for doc_name in ("SECURITY.md", "README.md", "docs/SECURITY.md"):
-        text = _read_text(path / doc_name)
-        if text and stem in text:
-            return True
+    # All neighboring manifests, checksums, signatures, and documentation are
+    # controlled by the extension artifact itself. They are attribution claims,
+    # not independent origin verification. Keep review required until an
+    # external registry/signature provider verifies the binary against a trust
+    # root.
+    del path, rel, all_paths
     return False
 
 
@@ -1308,10 +1371,51 @@ def _add_code_findings(
         ))
         capabilities.setdefault("process_execution", {"id": "process_execution", "evidence": []})["evidence"].append(rel)
 
-    # Generated entrypoints are still read, inventoried, AST-parsed, and scanned
-    # for direct capabilities. Native correlation below is deliberately skipped:
-    # character proximity inside a multi-module bundle is not source-to-sink flow.
+    for secret_id, label in secret_refs:
+        findings.append(_finding(
+            extension_id,
+            version,
+            f"secret-reference:{secret_id}",
+            "credential-access",
+            "LOW",
+            0.56,
+            f"Code references {label}.",
+            [rel],
+            "Confirm that the extension only reads secrets with explicit user intent and does not transmit them.",
+        ))
+
+    # Generated bundles collapse many unrelated modules into one file. Keep
+    # high-specificity local flow checks, but do not promote general token
+    # proximity across the bundle into correlated evidence.
     if _is_generated_code_blob(rel, text):
+        if secret_refs and has_file_read and has_network and _has_direct_credential_network_flow(text, secret_regex):
+            findings.append(_finding(
+                extension_id,
+                version,
+                "credential-exfiltration-chain",
+                "credential-access",
+                "HIGH",
+                0.92,
+                "A variable assigned from a sensitive local file is used directly as outbound request data.",
+                [rel],
+                "Remove or block this extension until the direct credential transfer is manually verified.",
+                {"evidence_class": "correlated", "correlation": "same-variable-local-flow"},
+            ))
+        if has_obfuscation and _DECODED_EXECUTION_RE.search(text) and has_network and _features_nearby(text, [
+            _DECODED_EXECUTION_RE,
+            NETWORK_SINK_RE,
+        ]):
+            findings.append(_finding(
+                extension_id,
+                version,
+                "obfuscation-execution-network",
+                "execution",
+                "HIGH",
+                0.82,
+                "Code combines locally adjacent decoded execution and network behavior.",
+                [rel],
+                "Treat as suspicious unless the generated dynamic code path is documented and reproducible.",
+            ))
         return
 
     if has_configured_cli and not has_shell_exec and not has_download:
@@ -1342,19 +1446,6 @@ def _add_code_findings(
     # Editor paths/selections and process APIs commonly share a file in legitimate
     # extensions. The Semgrep taint rule emits untrusted-workspace-input-to-process
     # only when it can establish a source-to-sink flow.
-
-    for secret_id, label in secret_refs:
-        findings.append(_finding(
-            extension_id,
-            version,
-            f"secret-reference:{secret_id}",
-            "credential-access",
-            "LOW",
-            0.56,
-            f"Code references {label}.",
-            [rel],
-            "Confirm that the extension only reads secrets with explicit user intent and does not transmit them.",
-        ))
 
     if secret_refs and has_file_read and _features_nearby(text, [secret_regex, FILE_READ_RE]):
         labels = ", ".join(label for _, label in secret_refs)
@@ -1793,7 +1884,7 @@ def _add_cross_extension_code_findings(
 def _find_sensitive_api_text(text: str, pattern: str, surface: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for match in re.finditer(pattern, text, re.I | re.S):
-        snippet = match.group("args") if "args" in match.groupdict() else match.group(0)
+        snippet = _balanced_call_arguments(text, match.start("args")) if "args" in match.groupdict() else match.group(0)
         if not _looks_sensitive_text(snippet):
             continue
         out.append({
@@ -1804,6 +1895,53 @@ def _find_sensitive_api_text(text: str, pattern: str, surface: str) -> list[dict
             "pos": match.start(),
         })
     return out[:10]
+
+
+def _balanced_call_arguments(text: str, start: int) -> str:
+    """Return only the matched call's arguments, including minified source.
+
+    Regex ranges that stop at a semicolon or newline can cross several comma-
+    chained expressions in generated bundles. This small lexical boundary
+    keeps credential terms in a neighboring call from contaminating the
+    surface being classified.
+    """
+    depth = 1
+    quote = ""
+    escaped = False
+    for index in range(start, min(len(text), start + 4000)):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:index]
+    return text[start:min(len(text), start + 500)]
+
+
+def _has_direct_credential_network_flow(text: str, secret_pattern: re.Pattern[str]) -> bool:
+    assignment = re.compile(r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]{1,1200})")
+    for match in assignment.finditer(text):
+        expression = match.group(2)
+        if not FILE_READ_RE.search(expression) or not secret_pattern.search(expression):
+            continue
+        variable = re.escape(match.group(1))
+        tail = text[match.end():min(len(text), match.end() + 3000)]
+        if not NETWORK_SINK_RE.search(tail):
+            continue
+        if re.search(rf"(?:body\s*:\s*{variable}\b|(?:write|send|post)\s*\(\s*{variable}\b)", tail):
+            return True
+    return False
 
 
 def _manifest_configuration_items(contributes: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1882,14 +2020,13 @@ def _features_nearby(text: str, patterns: list[re.Pattern[str]], window_lines: i
     # budget stays behaviorally equivalent to the old line window on non-minified files
     # while remaining tight on minified bundles.
     window_chars = max(window_lines * 72, 240)
-    char_hits: list[list[int]] = []
-    for pattern in patterns:
-        hits = [match.start() for match in pattern.finditer(text)]
-        if not hits:
-            return False
-        char_hits.append(hits)
-    for anchor in char_hits[0]:
-        if all(any(abs(hit - anchor) <= window_chars for hit in hits) for hits in char_hits[1:]):
+    anchors = [match.start() for match in patterns[0].finditer(text)]
+    if not anchors:
+        return False
+    for anchor in anchors:
+        start = max(0, anchor - window_chars)
+        end = min(len(text), anchor + window_chars)
+        if all((match := pattern.search(text, start)) is not None and match.start() <= end for pattern in patterns[1:]):
             return True
     return False
 
@@ -1899,11 +2036,19 @@ CSP_META_RE = re.compile(r"<meta[^>]+http-equiv\s*=\s*[\"']Content-Security-Poli
 CSP_UNSAFE_DIRECTIVE_RE = re.compile(r"unsafe-inline|unsafe-eval|script-src[^;\"']*\*", re.I)
 
 
-def _add_webview_csp_findings(extension_id: str, version: str, rel: str, text: str, findings: list[Finding]) -> None:
+def _add_webview_csp_findings(
+    extension_id: str,
+    version: str,
+    rel: str,
+    text: str,
+    findings: list[Finding],
+    *,
+    report_missing: bool = True,
+) -> None:
     if not WEBVIEW_SURFACE_RE.search(text):
         return
     csp_match = CSP_META_RE.search(text)
-    if not csp_match:
+    if not csp_match and report_missing:
         findings.append(_finding(
             extension_id,
             version,
@@ -1915,6 +2060,8 @@ def _add_webview_csp_findings(extension_id: str, version: str, rel: str, text: s
             [rel],
             "Add a strict Content-Security-Policy meta tag to every webview HTML document, scoping script-src/style-src to the webview's own origin and the webview.cspSource.",
         ))
+        return
+    if not csp_match:
         return
     if CSP_UNSAFE_DIRECTIVE_RE.search(csp_match.group(0)):
         findings.append(_finding(
@@ -2065,6 +2212,67 @@ def _load_threat_feed(path: Path | str | None = None) -> dict[str, dict[str, Any
     return out
 
 
+def _load_extension_advisories(path: Path | str | None = None) -> dict[str, Any]:
+    default_path = Path(__file__).parent / "intelligence" / "extension-advisories.json"
+    raw_path = Path(path or os.environ.get("IDE_SCANNER_EXTENSION_ADVISORIES_FILE") or default_path)
+    try:
+        raw = raw_path.read_bytes()
+        parsed = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return {"status": "unavailable", "snapshot_version": "unavailable", "sha256": "", "entries": []}
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("entries"), list):
+        return {"status": "invalid", "snapshot_version": "invalid", "sha256": hashlib.sha256(raw).hexdigest(), "entries": []}
+    return {
+        "status": "completed",
+        "snapshot_version": str(parsed.get("snapshot_version") or "unknown"),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "entries": [entry for entry in parsed["entries"] if isinstance(entry, dict)],
+    }
+
+
+def _apply_extension_advisories(extensions: list[ExtensionReport], bundle: dict[str, Any]) -> None:
+    for extension in extensions:
+        for entry in bundle.get("entries") or []:
+            if str(entry.get("extension_id") or "").lower() != extension.extension_id.lower():
+                continue
+            if str(entry.get("version") or "") != extension.version:
+                continue
+            expected_hash = str(entry.get("artifact_sha256") or "").lower()
+            if len(expected_hash) != 64 or expected_hash != extension.artifact_hash.lower():
+                continue
+            severity = str(entry.get("severity") or "HIGH").upper()
+            if severity not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+                severity = "HIGH"
+            evidence = dict(entry)
+            evidence.update({
+                "evidence_class": "vulnerability",
+                "snapshot_version": str(bundle.get("snapshot_version") or "unknown"),
+                "snapshot_sha256": str(bundle.get("sha256") or ""),
+                "exact": True,
+            })
+            extension.findings.append(_finding(
+                extension.extension_id,
+                extension.version,
+                "known-vulnerable-extension",
+                "vulnerability",
+                severity,
+                0.98,
+                str(entry.get("summary") or "Exact extension artifact matched a vulnerability advisory."),
+                [],
+                "Follow the linked advisory and reject the exact artifact when policy_action is block.",
+                evidence,
+            ))
+        (
+            extension.verdict,
+            extension.verdict_reason,
+            extension.malware_authority,
+            extension.severity,
+            extension.malware_score,
+            extension.risk_score,
+            extension.score_details,
+        ) = _classify_findings(extension.findings)
+
+
 def _sandbox_observation_finding(extension: ExtensionReport, item: dict[str, Any]) -> Finding | None:
     kind = str(item.get("kind") or item.get("type") or item.get("rule_id") or "").strip()
     mapping = {
@@ -2121,6 +2329,7 @@ def _build_report(
     registry: dict[str, Any],
     previous_report: dict[str, Any] | None = None,
     include_posture: bool = True,
+    intelligence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     version_deltas = _version_deltas(extensions, previous_report)
     deltas_by_id = {str(item.get("extension_id")): item for item in version_deltas}
@@ -2164,8 +2373,12 @@ def _build_report(
         "schema_version": "0.1.0",
         "scan_id": f"scan_{now.strftime('%Y%m%d%H%M%S')}",
         "created_at": now.isoformat().replace("+00:00", "Z"),
+        "scanner_build": os.environ.get("IDE_SCANNER_BUILD_SHA", "").strip() or "unknown",
+        "ruleset_version": RULESET_VERSION,
+        "policy_version": POLICY_VERSION,
         "privacy_mode": "local-metadata-and-static-features",
         "registry_checks": registry,
+        "intelligence": dict(intelligence or {}),
         "summary": summary,
         "human_summary": _human_summary(summary, extensions, registry, version_deltas, posture_summary if include_posture else None),
         "version_deltas": version_deltas,
@@ -2329,6 +2542,7 @@ def _version_deltas(extensions: list[ExtensionReport], previous_report: dict[str
 def _apply_security_decision(extension: ExtensionReport) -> None:
     coverage = extension.analysis_coverage or extension.artifact_inventory.get("analysis_coverage") or {}
     incomplete = bool(extension.artifact_inventory.get("scan_incomplete")) or coverage.get("status") == "incomplete"
+    extension.analysis_status = _analysis_status(extension, coverage, incomplete)
     if extension.verdict == "malicious":
         extension.decision = "block"
         extension.decision_reason = "Confirmed malicious intelligence or an exact known-bad artifact matched."
@@ -2338,6 +2552,17 @@ def _apply_security_decision(extension: ExtensionReport) -> None:
         extension.decision_reason = str(extension.artifact_inventory.get("skipped_reason") or "Executable analysis did not complete.")
         return
     blocking_rule_ids = _preventive_blocking_rule_ids(extension.findings)
+    vulnerability_blocks = {
+        finding.rule_id for finding in extension.findings
+        if finding_actionability(finding) == "block" and _finding_evidence_class(finding) == "vulnerability"
+    }
+    if vulnerability_blocks:
+        extension.decision = "block"
+        extension.decision_reason = (
+            "Reject this exact artifact: authoritative vulnerability intelligence matched "
+            f"({', '.join(sorted(vulnerability_blocks))}). This is a vulnerability policy decision, not a malware label."
+        )
+        return
     if blocking_rule_ids:
         extension.decision = "block"
         extension.decision_reason = (
@@ -2357,6 +2582,21 @@ def _apply_security_decision(extension: ExtensionReport) -> None:
         return
     extension.decision = "allow"
     extension.decision_reason = "Analysis completed without actionable evidence or unapproved baseline changes."
+
+
+def _analysis_status(extension: ExtensionReport, coverage: dict[str, Any], incomplete: bool) -> str:
+    if not incomplete and coverage.get("status") == "complete":
+        return "complete"
+    providers = coverage.get("providers") if isinstance(coverage.get("providers"), dict) else {}
+    acquisition = providers.get("artifact_acquisition") if isinstance(providers, dict) else None
+    manifest = coverage.get("manifest_validation") if isinstance(coverage.get("manifest_validation"), dict) else {}
+    if (
+        extension.source == "marketplace-error"
+        or (isinstance(acquisition, dict) and acquisition.get("status") == "failed")
+        or manifest.get("status") == "scan-aborted"
+    ):
+        return "failed"
+    return "incomplete"
 
 
 def _preventive_blocking_rule_ids(findings: list[Finding]) -> set[str]:
@@ -2943,7 +3183,7 @@ def _read_manifest(path: Path) -> dict[str, Any]:
     return manifest
 
 
-def _javascript_ast_provider_status(statuses: list[str]) -> dict[str, Any]:
+def _javascript_ast_provider_status(statuses: list[str], failed_paths: list[str] | None = None) -> dict[str, Any]:
     """Summarize per-file JS/TS AST walker statuses into a provider record.
 
     ``completed`` only when every analyzed file's walker ran successfully. A
@@ -2967,7 +3207,13 @@ def _javascript_ast_provider_status(statuses: list[str]) -> dict[str, Any]:
     forces the decision to at least ``review``. This provider record stays
     ``completed`` in both cases; the review gate lives in the finding, not
     here."""
-    record: dict[str, Any] = {"provider": "javascript_ast", "required": True}
+    record: dict[str, Any] = {
+        "provider": "javascript_ast",
+        "required": True,
+        "timeout_seconds_per_file": JS_AST_TIMEOUT_SECONDS,
+        "max_timeout_attempts": JS_AST_TIMEOUT_ATTEMPTS,
+        "max_old_space_mb": JS_AST_MAX_OLD_SPACE_MB,
+    }
     if not statuses:
         # No JS/TS files were reachable; nothing for this provider to do.
         record["status"] = "completed"
@@ -2983,6 +3229,8 @@ def _javascript_ast_provider_status(statuses: list[str]) -> dict[str, Any]:
         reasons = sorted(set(hard_failures))
         record["status"] = "failed"
         record["error"] = f"AST analysis did not complete for {len(hard_failures)} file(s): {', '.join(reasons)}"
+        if failed_paths:
+            record["failed_paths"] = sorted(set(failed_paths))
         if "node-missing" in reasons:
             record["error"] = "Node runtime unavailable; JavaScript AST analysis did not run."
     elif unparsed:
@@ -3153,14 +3401,9 @@ def _classify_findings(findings: list[Finding]) -> tuple[str, str, str, str, int
         return "clean", "No suspicious extension behavior was detected by local static analysis.", "none", "INFO", 0, 0, score_details
 
     severity = "INFO"
-    decision_relevant = [
-        finding for finding in findings
-        if _is_confirmed_malware_finding(finding)
-        or _is_actionable_review_finding(finding)
-        or _finding_evidence_class(finding) in {"correlated", "observed", "exposure"}
-    ]
+    decision_relevant = [finding for finding in findings if is_decision_relevant(finding)]
     for finding in decision_relevant:
-        severity = rank_severity(severity, finding.severity)
+        severity = rank_severity(severity, effective_finding_severity(finding))
     malware_score = int(score_details["malware_score"])
     risk_score = int(score_details["risk_score"])
 
@@ -3218,7 +3461,7 @@ def _classify_findings(findings: list[Finding]) -> tuple[str, str, str, str, int
             score_details,
         )
 
-    has_actionable_review = any(_is_actionable_review_finding(finding) for finding in findings)
+    has_actionable_review = any(is_review_relevant(finding) for finding in findings)
     if has_actionable_review:
         return (
             "review",
@@ -3228,6 +3471,18 @@ def _classify_findings(findings: list[Finding]) -> tuple[str, str, str, str, int
             malware_score,
             risk_score,
             score_details,
+        )
+
+    if decision_relevant:
+        low_details = _low_note_score_details(score_details)
+        return (
+            "clean",
+            "Analysis found low-severity hardening notes but no evidence requiring approval review.",
+            "none",
+            severity,
+            0,
+            int(low_details["risk_score"]),
+            low_details,
         )
 
     return (
@@ -3242,25 +3497,18 @@ def _classify_findings(findings: list[Finding]) -> tuple[str, str, str, str, int
 
 
 def _is_actionable_review_finding(finding: Finding) -> bool:
-    evidence_class = _finding_evidence_class(finding)
-    if finding.rule_id == "vulnerable-npm-dependency" and not bool((finding.evidence or {}).get("exact")):
-        # A manifest range is not proof that the vulnerable version is present
-        # in the exact packaged artifact. Preserve the advisory as context, but
-        # require a resolved/locked version before it can change the decision.
-        return False
-    if evidence_class in {"correlated", "dependency", "observed", "posture", "provenance"}:
-        return True
-    if evidence_class == "exposure":
-        return True
-    if evidence_class == "capability":
-        return finding.rule_id not in {
-            "ast-dynamic-call-target",
-            "broad-activation",
-            "powerful-ide-contribution",
-            "sensitive-activation",
-            "startup-activation",
-        }
-    return False
+    return is_review_relevant(finding)
+
+
+def _low_note_score_details(score_details: dict[str, Any]) -> dict[str, Any]:
+    details = dict(score_details)
+    risk_score = min(32, max(1, int(details.get("risk_score") or 0)))
+    details["score"] = risk_score
+    details["malware_score"] = 0
+    details["risk_score"] = risk_score
+    details["basis"] = "low_hardening"
+    details["confidence"] = "medium"
+    return details
 
 
 def _non_actionable_score_details(score_details: dict[str, Any]) -> dict[str, Any]:
@@ -3287,6 +3535,7 @@ def _empty_score_details() -> dict[str, Any]:
             "sensitive_capability": 0,
             "provenance": 0,
             "dependency": 0,
+            "vulnerability": 0,
             "posture": 0,
             "cross_extension_exposure": 0,
             "reputation": 0,
@@ -3300,6 +3549,7 @@ def _empty_score_details() -> dict[str, Any]:
             "capability": 0,
             "provenance": 0,
             "dependency": 0,
+            "vulnerability": 0,
             "posture": 0,
             "exposure": 0,
             "reputation": 0,
@@ -3320,11 +3570,21 @@ def _score_details(findings: list[Finding]) -> dict[str, Any]:
     capability_score = _capability_score(findings)
     provenance_score = _provenance_score(findings)
     dependency_score = _dependency_score(findings)
+    vulnerability_score = _vulnerability_score(findings)
     observed_score = _observed_score(findings)
     posture_score = _posture_score(findings)
     exposure_score = _exposure_score(findings)
     reputation_score = _reputation_score(findings)
-    has_actionable_context = correlated_score > 0 or capability_score > 0 or provenance_score > 0 or dependency_score > 0 or observed_score > 0 or posture_score > 0 or exposure_score > 0
+    has_actionable_context = (
+        correlated_score > 0
+        or capability_score > 0
+        or provenance_score > 0
+        or dependency_score > 0
+        or vulnerability_score > 0
+        or observed_score > 0
+        or posture_score > 0
+        or exposure_score > 0
+    )
     weak_score = _weak_score(findings, has_actionable_context)
 
     components = {
@@ -3334,6 +3594,7 @@ def _score_details(findings: list[Finding]) -> dict[str, Any]:
         "sensitive_capability": capability_score,
         "provenance": provenance_score,
         "dependency": dependency_score,
+        "vulnerability": vulnerability_score,
         "posture": posture_score,
         "cross_extension_exposure": exposure_score,
         "reputation": reputation_score,
@@ -3370,6 +3631,7 @@ def _score_basis(components: dict[str, int]) -> tuple[str, str]:
         "confirmed_intelligence",
         "observed_behavior",
         "correlated_behavior",
+        "vulnerability",
         "dependency",
         "provenance",
         "sensitive_capability",
@@ -3511,6 +3773,14 @@ def _dependency_score(findings: list[Finding]) -> int:
             score = max(score, 46)
         elif finding.rule_id == "unpinned-dependency":
             score = max(score, 28)
+    return score
+
+
+def _vulnerability_score(findings: list[Finding]) -> int:
+    score = 0
+    for finding in findings:
+        if _finding_evidence_class(finding) == "vulnerability":
+            score = max(score, finding.score)
     return score
 
 

@@ -42,6 +42,16 @@ HTML, ZIP, JSON, or Markdown.
 
 Missing required analysis produces `INCOMPLETE`, never `ALLOW`.
 
+## Engine integrity
+
+The scanner runtime remains bundled inside Guardrails. Its exact source
+revision and file hashes are recorded in the package, and CI rejects unrecorded
+engine drift:
+
+```bash
+python scripts/sync_vendored_engine.py --check
+```
+
 ## Privacy
 
 Installed extensions are analyzed from private temporary snapshots. Extension

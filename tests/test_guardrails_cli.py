@@ -23,14 +23,14 @@ class GuardrailsCliTests(unittest.TestCase):
         code, output, error = self.run_cli(["version"])
         self.assertEqual(code, 0)
         self.assertEqual(error, "")
-        self.assertIn("Guardrails 0.3.3", output)
+        self.assertIn("Guardrails 0.3.4", output)
 
     def test_standard_version_flag_is_supported(self) -> None:
         output = io.StringIO()
         with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
             cli.main(["--version"])
         self.assertEqual(stopped.exception.code, 0)
-        self.assertIn("Guardrails 0.3.3", output.getvalue())
+        self.assertIn("Guardrails 0.3.4", output.getvalue())
 
     def test_help_manual_explains_commands_and_shortcuts(self) -> None:
         code, output, error = self.run_cli(["help"])

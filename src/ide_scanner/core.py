@@ -19,6 +19,7 @@ class ScanRequest:
     online: bool = False
     known_bad_hashes_file: Path | str | None = None
     threat_feed_file: Path | str | None = None
+    extension_advisories_file: Path | str | None = None
     sandbox_observations_file: Path | str | None = None
     previous_report_file: Path | str | None = None
     include_posture: bool = True
@@ -52,6 +53,7 @@ def run_scan(request: ScanRequest) -> dict[str, Any]:
         online=request.online,
         known_bad_hashes_file=request.known_bad_hashes_file,
         threat_feed_file=request.threat_feed_file,
+        extension_advisories_file=request.extension_advisories_file,
         sandbox_observations_file=request.sandbox_observations_file,
         previous_report_file=request.previous_report_file,
         include_posture=request.include_posture,

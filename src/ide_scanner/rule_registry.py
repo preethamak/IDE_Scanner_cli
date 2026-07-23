@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from .classification_policy import POLICY_VERSION
 from .models import RuleMetadata
 from .rules import CODE_RULES
 
-RULESET_VERSION = "2026.07.19"
+RULESET_VERSION = "2026.07.22-policy-v3-calibration.5"
 
 
 _RULE_OVERRIDES: dict[str, dict[str, object]] = {
@@ -126,6 +127,15 @@ _RULE_OVERRIDES: dict[str, dict[str, object]] = {
         "description": "Package or file hash matched configured malicious intelligence.",
         "recommendation": "Block or remove this extension.",
         "benchmark_tags": ["confirmed", "hash"],
+    },
+    "known-vulnerable-extension": {
+        "title": "Known vulnerable extension artifact",
+        "category": "vulnerability",
+        "evidence_class": "vulnerability",
+        "default_severity": "HIGH",
+        "description": "Exact extension identity, version, and artifact hash matched a versioned vulnerability advisory.",
+        "recommendation": "Follow the advisory policy action for this exact artifact.",
+        "benchmark_tags": ["vulnerability", "advisory", "exact-artifact"],
     },
     "marketplace-removed-package": {
         "title": "Marketplace removed package",
@@ -475,6 +485,7 @@ def rule_registry() -> list[RuleMetadata]:
 def rules_json() -> dict[str, object]:
     return {
         "ruleset_version": RULESET_VERSION,
+        "policy_version": POLICY_VERSION,
         "rules": [rule.to_dict() for rule in rule_registry()],
     }
 
@@ -506,6 +517,8 @@ def _engine_for(rule_id: str, tags: list[str]) -> str:
 def _decision_effect(evidence_class: str) -> str:
     if evidence_class == "confirmed":
         return "block-by-default"
+    if evidence_class == "vulnerability":
+        return "review-or-block-by-policy"
     if evidence_class in {"correlated", "dependency", "provenance"}:
         return "review-or-block-by-policy"
     if evidence_class in {"capability", "exposure"}:

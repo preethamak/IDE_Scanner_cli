@@ -10,6 +10,9 @@ dist/
 build/
 *.zip
 *.json
+!src/guardrails_cli/engine_source.json
+!src/ide_scanner/intelligence/
+!src/ide_scanner/intelligence/extension-advisories.json
 *.html
 *.md.tmp
 .DS_Store

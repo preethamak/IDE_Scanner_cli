@@ -9,6 +9,7 @@ VerdictState = Literal["safe", "safe_with_notes", "needs_review", "suspicious", 
 Decision = Literal["allow", "review", "block", "incomplete"]
 PublicOutcome = Literal["clear", "expected_capability", "investigate", "preventive_block", "confirmed_threat", "incomplete"]
 Status = Literal["success", "warning", "failure", "skipped"]
+AnalysisStatus = Literal["complete", "incomplete", "failed"]
 
 
 @dataclass
@@ -31,6 +32,12 @@ class Finding:
         data = asdict(self)
         if data["evidence"] is None:
             data.pop("evidence")
+        # Import lazily to keep the model layer independent while ensuring
+        # every serializer exposes the same policy-normalized finding fields.
+        from .classification_policy import effective_finding_severity, finding_actionability, finding_evidence_class
+        data["evidence_class"] = finding_evidence_class(self)
+        data["actionability"] = finding_actionability(self)
+        data["effective_severity"] = effective_finding_severity(self)
         return data
 
 
@@ -79,6 +86,7 @@ class ExtensionReport:
     score_schema_version: str = "2"
     artifact_identity: dict[str, Any] = field(default_factory=dict)
     analysis_coverage: dict[str, Any] = field(default_factory=dict)
+    analysis_status: AnalysisStatus = "incomplete"
     baseline_diff: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -106,6 +114,8 @@ class ReportMetadata:
     # A ruleset name alone is not enough to reproduce a decision: scanner
     # implementation changes can alter classification without adding a rule.
     scanner_build: str = "unknown"
+    policy_version: str = "legacy"
+    intelligence_snapshot: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -145,6 +155,7 @@ class ExtensionSummary:
     score_schema_version: str = "2"
     artifact_sha256: str = ""
     coverage_percent: int = 0
+    analysis_status: AnalysisStatus = "incomplete"
     baseline_changed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -193,6 +204,7 @@ class ExtensionDetail:
     score_schema_version: str = "2"
     artifact_identity: dict[str, Any] = field(default_factory=dict)
     analysis_coverage: dict[str, Any] = field(default_factory=dict)
+    analysis_status: AnalysisStatus = "incomplete"
     baseline_diff: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
