@@ -321,9 +321,21 @@ class GuardrailsApp(App[TuiResult | None]):
 
     #extensions:focus { border: round $brand; }
 
-    #primary-actions, #report-actions {
+    #primary-actions {
         height: 3;
         margin-top: 1;
+    }
+
+    #report-actions {
+        height: 1;
+        margin-top: 1;
+    }
+
+    #report-actions Button {
+        height: 1;
+        min-width: 10;
+        padding: 0 1;
+        border: none;
     }
 
     Button { margin-right: 1; min-width: 12; }

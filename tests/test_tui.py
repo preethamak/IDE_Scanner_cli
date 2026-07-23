@@ -84,7 +84,7 @@ class GuardrailsTuiTests(unittest.IsolatedAsyncioTestCase):
             app._scan_complete(view, view)
             await pilot.pause()
             self.assertEqual(app.query_one("#result-table", DataTable).row_count, 1)
-            self.assertGreaterEqual(app.query_one("#report-scroll").region.height, 12)
+            self.assertGreaterEqual(app.query_one("#report-scroll").region.height, 14)
             detail = str(app.query_one("#report-detail", Static).render())
             self.assertIn("Malware evidence", detail)
             self.assertIn("PROCESS_EXECUTION", detail)
