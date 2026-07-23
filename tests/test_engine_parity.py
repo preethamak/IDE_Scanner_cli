@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 import zipfile
 from importlib.resources import files
 from pathlib import Path
 
-from guardrails_cli.scanner_adapter import engine_identity, scan_paths, write_bundle
+from guardrails_cli.scanner_adapter import engine_identity, scan_paths, verify_engine_integrity, write_bundle
 from ide_scanner.classification_policy import POLICY_VERSION
 from ide_scanner.rule_registry import rules_json
 
@@ -19,6 +20,16 @@ class EngineParityTests(unittest.TestCase):
         check()
         source = json.loads(files("guardrails_cli").joinpath("engine_source.json").read_text(encoding="utf-8"))
         self.assertEqual(engine_identity()["build"], source["source_revision"])
+
+    def test_runtime_integrity_check_rejects_overwritten_engine_files(self) -> None:
+        source_root = Path(__file__).parents[1] / "src" / "ide_scanner"
+        with tempfile.TemporaryDirectory() as directory:
+            copied_root = Path(directory) / "ide_scanner"
+            shutil.copytree(source_root, copied_root)
+            with (copied_root / "scanner.py").open("a", encoding="utf-8") as handle:
+                handle.write("\n# unexpected overwrite\n")
+            with self.assertRaisesRegex(RuntimeError, "integrity check failed"):
+                verify_engine_integrity(copied_root)
 
     def test_cli_bundle_preserves_canonical_engine_classification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

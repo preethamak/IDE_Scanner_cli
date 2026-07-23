@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -10,6 +11,8 @@ from importlib.metadata import PackageNotFoundError, distribution
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
+
+import ide_scanner
 
 from guardrails_cli import __version__
 
@@ -21,10 +24,12 @@ from ide_scanner.scanner import scan_targets
 
 
 def search_extensions(query: str, *, limit: int = 20) -> list[dict[str, Any]]:
+    verify_engine_integrity()
     return search_marketplace_extensions(query, page_size=limit)
 
 
 def installed_extensions() -> list[dict[str, Any]]:
+    verify_engine_integrity()
     rows: list[dict[str, Any]] = []
     for target in discover_local_installations():
         path = Path(target["path"])
@@ -46,6 +51,7 @@ def installed_extensions() -> list[dict[str, Any]]:
 
 
 def scan_marketplace(extension_id: str, *, version: str | None = None) -> dict[str, Any]:
+    verify_engine_integrity()
     return scan_targets(
         marketplace_scan_ids=[extension_id],
         marketplace_version=version,
@@ -55,15 +61,43 @@ def scan_marketplace(extension_id: str, *, version: str | None = None) -> dict[s
 
 
 def scan_paths(paths: list[str | Path], *, online: bool = False) -> dict[str, Any]:
+    verify_engine_integrity()
     return scan_targets(paths=[Path(item) for item in paths], online=online, include_posture=False)
 
 
 def discover_paths(path: str | Path) -> list[dict[str, str]]:
+    verify_engine_integrity()
     return discover_from_path(path)
 
 
 def get_rules() -> dict[str, Any]:
+    verify_engine_integrity()
     return rules_json()
+
+
+def verify_engine_integrity(engine_root: Path | None = None) -> None:
+    try:
+        source = json.loads(files("guardrails_cli").joinpath("engine_source.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        raise RuntimeError(f"Bundled scanner identity is unreadable: {exc}") from exc
+    expected = source.get("files")
+    if not isinstance(expected, dict) or not expected:
+        raise RuntimeError("Bundled scanner identity contains no file hashes.")
+    root = engine_root or Path(ide_scanner.__file__).resolve().parent
+    for relative, expected_hash in sorted(expected.items()):
+        path = Path(str(relative))
+        if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+            raise RuntimeError(f"Bundled scanner identity contains an unsafe path: {relative!r}")
+        target = root / path
+        try:
+            actual_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise RuntimeError(f"Bundled scanner file is unavailable: {relative}") from exc
+        if actual_hash != expected_hash:
+            raise RuntimeError(
+                f"Bundled scanner integrity check failed for {relative}. "
+                "Reinstall Guardrails before scanning."
+            )
 
 
 def engine_identity() -> dict[str, str]:
