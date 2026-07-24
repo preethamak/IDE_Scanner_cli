@@ -99,6 +99,7 @@ class EngineParityTests(unittest.TestCase):
                 detail = json.loads(archive.read(leaderboard["extensions"][0]["detail_ref"]))
 
         raw = report["extensions"][0]
+        self.assertEqual(report["scanner_build"], engine_identity()["build"])
         for field in (
             "analysis_status",
             "decision",

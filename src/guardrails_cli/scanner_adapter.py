@@ -10,7 +10,7 @@ import tempfile
 import zipfile
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from guardrails_cli import __version__
 
@@ -96,12 +96,14 @@ def scan_marketplace(
     registry_snapshot: str | Path | None = None,
 ) -> dict[str, Any]:
     verify_engine_integrity()
-    return scan_targets(
-        marketplace_scan_ids=[extension_id],
-        marketplace_version=version,
-        online=True,
-        registry_snapshot_file=registry_snapshot,
-        include_posture=False,
+    return _run_engine_scan(
+        lambda: scan_targets(
+            marketplace_scan_ids=[extension_id],
+            marketplace_version=version,
+            online=True,
+            registry_snapshot_file=registry_snapshot,
+            include_posture=False,
+        )
     )
 
 
@@ -112,12 +114,26 @@ def scan_paths(
     registry_snapshot: str | Path | None = None,
 ) -> dict[str, Any]:
     verify_engine_integrity()
-    return scan_targets(
-        paths=[Path(item) for item in paths],
-        online=online,
-        registry_snapshot_file=registry_snapshot,
-        include_posture=False,
+    return _run_engine_scan(
+        lambda: scan_targets(
+            paths=[Path(item) for item in paths],
+            online=online,
+            registry_snapshot_file=registry_snapshot,
+            include_posture=False,
+        )
     )
+
+
+def _run_engine_scan(operation: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    previous = os.environ.get("IDE_SCANNER_BUILD_SHA")
+    os.environ["IDE_SCANNER_BUILD_SHA"] = engine_identity()["build"]
+    try:
+        return operation()
+    finally:
+        if previous is None:
+            os.environ.pop("IDE_SCANNER_BUILD_SHA", None)
+        else:
+            os.environ["IDE_SCANNER_BUILD_SHA"] = previous
 
 
 def discover_paths(path: str | Path) -> list[dict[str, str]]:
