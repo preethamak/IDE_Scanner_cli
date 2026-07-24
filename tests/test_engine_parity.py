@@ -12,6 +12,7 @@ from importlib.resources import files
 from pathlib import Path
 
 from guardrails_cli.scanner_adapter import display_report, engine_identity, scan_paths, verify_engine_integrity, write_bundle
+from ide_scanner.providers.runtime import SEMGREP_RULES, YARA_RULES, provider_diagnostics
 from ide_scanner.classification_policy import POLICY_VERSION
 from ide_scanner.rule_registry import rules_json
 
@@ -39,6 +40,18 @@ class EngineParityTests(unittest.TestCase):
         check()
         source = json.loads(files("guardrails_cli").joinpath("engine_source.json").read_text(encoding="utf-8"))
         self.assertEqual(engine_identity()["build"], source["source_revision"])
+        self.assertEqual(source["source_component"], "guardrails-scanner-runtime")
+        self.assertNotIn("source_repository", source)
+
+    def test_static_provider_rules_are_part_of_the_verified_runtime(self) -> None:
+        source = json.loads(files("guardrails_cli").joinpath("engine_source.json").read_text(encoding="utf-8"))
+        self.assertIn("provider_rules/semgrep/vscode-security.yml", source["files"])
+        self.assertIn("provider_rules/yara/ide-scanner.yar", source["files"])
+        self.assertTrue(SEMGREP_RULES.is_dir())
+        self.assertTrue(YARA_RULES.is_file())
+        diagnostics = provider_diagnostics()
+        self.assertTrue(diagnostics["semgrep"]["ruleset_hash"])
+        self.assertTrue(diagnostics["yara"]["ruleset_hash"])
 
     def test_runtime_integrity_check_rejects_overwritten_engine_files(self) -> None:
         source_root = Path(__file__).parents[1] / "src" / "ide_scanner"

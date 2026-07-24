@@ -15,7 +15,7 @@ from .jsonc import loads_jsonc
 from .models import ExtensionDetail, ExtensionReport, ExtensionSummary, Recommendation, ReportMetadata
 from .rule_registry import rules_json
 
-SCHEMA_VERSION = "2.2"
+SCHEMA_VERSION = "2.3"
 
 
 def build_report_bundle(
@@ -643,12 +643,10 @@ def _sorted_counts(counts: dict[str, int]) -> dict[str, int]:
 
 
 def _scanner_version() -> str:
-    for distribution_name in ("guardlens-core", "guardlens"):
-        try:
-            return version(distribution_name)
-        except PackageNotFoundError:
-            continue
-    return "unknown"
+    try:
+        return version("guardlens")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def _scanner_build() -> str:

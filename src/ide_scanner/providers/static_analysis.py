@@ -1,21 +1,23 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
-import os
-import shutil
+import mmap
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
 
 from ..models import Finding
 from ..rules import score_finding
+from .runtime import (
+    YARA_RULES,
+    semgrep_config_arguments,
+    semgrep_diagnostic,
+    semgrep_runtime_environment,
+    semgrep_timeout_seconds,
+    yara_diagnostic,
+)
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-_SEMGREP_RULES = _PROJECT_ROOT / "rules" / "semgrep"
-_YARA_RULES = _PROJECT_ROOT / "rules" / "yara" / "ide-scanner.yar"
 _YARA_RULE_MAP = {
     "ide_scanner_unicode_evasion": ("unicode-evasion", "code", "MEDIUM", "weak"),
     # YARA can only establish that markers co-occur in one file; it cannot prove
@@ -28,45 +30,74 @@ _YARA_RULE_MAP = {
 _YARA_NON_EXECUTABLE_SUFFIXES = {".map", ".md", ".txt", ".json", ".jsonc"}
 
 
-def _ignore_yara_match(rule_name: str, rel: str) -> bool:
+def _ignore_yara_match(rule_name: str, rel: str, path: Path) -> bool:
     suffix = Path(rel).suffix.lower()
-    if rule_name == "ide_scanner_embedded_pe" and suffix in _YARA_NON_EXECUTABLE_SUFFIXES:
-        return True
+    if rule_name in {"ide_scanner_unicode_evasion", "ide_scanner_encoded_dynamic_execution"}:
+        return suffix not in {".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ps1", ".py", ".sh", ".ts", ".tsx"}
+    if rule_name == "ide_scanner_embedded_pe":
+        if suffix in _YARA_NON_EXECUTABLE_SUFFIXES:
+            return True
+        return not _has_valid_embedded_pe(path)
     return False
 
 
-def run_static_providers(root: Path, extension_id: str, version: str) -> tuple[list[Finding], dict[str, Any]]:
+def run_static_providers(
+    root: Path,
+    extension_id: str,
+    version: str,
+    *,
+    targets: dict[str, list[str]] | None = None,
+) -> tuple[list[Finding], dict[str, Any]]:
     findings: list[Finding] = []
     statuses: dict[str, Any] = {}
-    semgrep_findings, statuses["semgrep"] = _run_semgrep(root, extension_id, version)
-    yara_findings, statuses["yara"] = _run_yara(root, extension_id, version)
+    semgrep_findings, statuses["semgrep"] = _run_semgrep(
+        root, extension_id, version, _resolved_targets(root, targets, "semgrep")
+    )
+    yara_findings, statuses["yara"] = _run_yara(
+        root, extension_id, version, _resolved_targets(root, targets, "yara")
+    )
     findings.extend(semgrep_findings)
     findings.extend(yara_findings)
     return findings, statuses
 
 
-def _run_semgrep(root: Path, extension_id: str, version: str) -> tuple[list[Finding], dict[str, Any]]:
-    executable = shutil.which("semgrep")
-    status = _provider_status("semgrep", executable, _SEMGREP_RULES)
-    if not executable or not _SEMGREP_RULES.is_dir():
+def _run_semgrep(
+    root: Path,
+    extension_id: str,
+    version: str,
+    targets: list[Path] | None = None,
+) -> tuple[list[Finding], dict[str, Any]]:
+    status = semgrep_diagnostic()
+    executable = str(status["executable"])
+    if status["status"] != "available":
+        return [], status
+    selected = targets if targets is not None else [root]
+    status["target_count"] = len(selected)
+    if not selected:
+        status.update({"status": "completed", "finding_count": 0, "error_count": 0, "errors": [], "error": ""})
         return [], status
     command = [
         executable,
         "scan",
-        "--config", str(_SEMGREP_RULES),
+        *semgrep_config_arguments(),
         "--json",
         "--metrics", "off",
         "--disable-version-check",
         "--no-git-ignore",
+        "--jobs", "1",
         "--max-target-bytes", str(10 * 1024 * 1024),
-        str(root),
+        *(str(path) for path in selected),
     ]
     try:
-        env = os.environ.copy()
-        env["SEMGREP_SETTINGS_FILE"] = str(Path(tempfile.gettempdir()) / "ide-scanner-semgrep-settings.yml")
-        env["SEMGREP_LOG_FILE"] = str(Path(tempfile.gettempdir()) / "ide-scanner-semgrep.log")
-        env["SEMGREP_SEND_METRICS"] = "off"
-        result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False, env=env)
+        with semgrep_runtime_environment() as environment:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=semgrep_timeout_seconds(),
+                check=False,
+                env=environment,
+            )
         payload = json.loads(result.stdout or "{}")
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
         status.update({"status": "failed", "error": str(exc)})
@@ -131,56 +162,63 @@ def _semgrep_finding(item: dict[str, Any], root: Path, extension_id: str, versio
     )
 
 
-def _run_yara(root: Path, extension_id: str, version: str) -> tuple[list[Finding], dict[str, Any]]:
-    executable = shutil.which("yara")
-    python_available = importlib.util.find_spec("yara") is not None
-    status = _provider_status("yara", executable or ("yara-python" if python_available else None), _YARA_RULES)
-    if not _YARA_RULES.is_file():
+def _run_yara(
+    root: Path,
+    extension_id: str,
+    version: str,
+    targets: list[Path] | None = None,
+) -> tuple[list[Finding], dict[str, Any]]:
+    status = yara_diagnostic()
+    executable = str(status["executable"])
+    if status["status"] != "available":
         return [], status
-    if not executable and python_available:
-        return _run_yara_python(root, extension_id, version, status)
-    if not executable:
-        return [], status
-    try:
-        result = subprocess.run(
-            [executable, "-N", "-r", str(_YARA_RULES), str(root)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        status.update({"status": "failed", "error": str(exc)})
+    selected = targets
+    status["target_count"] = len(selected) if selected is not None else None
+    if executable == "yara-python":
+        return _run_yara_python(root, extension_id, version, status, selected)
+    scan_targets = selected if selected is not None else [root]
+    if not scan_targets:
+        status.update({"status": "completed", "finding_count": 0, "files_analyzed": 0, "error": ""})
         return [], status
     findings: list[Finding] = []
-    for line in result.stdout.splitlines():
-        rule_name, separator, matched_path = line.partition(" ")
-        if not separator or rule_name not in _YARA_RULE_MAP:
-            continue
-        rule_id, category, severity, evidence_class = _YARA_RULE_MAP[rule_name]
-        path = Path(matched_path.strip())
+    errors: list[str] = []
+    for target in scan_targets:
         try:
-            rel = path.resolve().relative_to(root.resolve()).as_posix()
-        except (OSError, ValueError):
-            rel = path.as_posix()
-        if _ignore_yara_match(rule_name, rel):
+            result = subprocess.run(
+                [executable, "-N", str(YARA_RULES), str(target)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            errors.append(f"{target}: {exc}")
             continue
-        findings.append(_provider_finding(
-            extension_id,
-            version,
-            rule_id,
-            category,
-            severity,
-            0.8 if evidence_class == "correlated" else 0.68,
-            f"YARA rule {rule_name} matched {rel}.",
-            [rel],
-            "Inspect the matched bytes and validate the rule provenance before taking action.",
-            {"provider": "yara", "provider_rule_id": rule_name, "evidence_class": evidence_class},
-        ))
+        if result.returncode not in {0, 1}:
+            errors.append(result.stderr.strip()[:500] or f"{target}: exit {result.returncode}")
+            continue
+        for line in result.stdout.splitlines():
+            rule_name, separator, matched_path = line.partition(" ")
+            if not separator or rule_name not in _YARA_RULE_MAP:
+                continue
+            rule_id, category, severity, evidence_class = _YARA_RULE_MAP[rule_name]
+            path = Path(matched_path.strip())
+            try:
+                rel = path.resolve().relative_to(root.resolve()).as_posix()
+            except (OSError, ValueError):
+                rel = path.as_posix()
+            if _ignore_yara_match(rule_name, rel, path):
+                continue
+            findings.append(_yara_finding(
+                extension_id, version, rule_name, rule_id, category, severity, evidence_class, rel
+            ))
     status.update({
-        "status": "completed" if result.returncode in {0, 1} else "failed",
+        "status": "completed" if not errors else "failed",
         "finding_count": len(findings),
-        "error": result.stderr.strip()[:500],
+        "files_analyzed": len(scan_targets) - len(errors),
+        "error_count": len(errors),
+        "errors": errors[:10],
+        "error": errors[0] if errors else "",
     })
     return findings, status
 
@@ -190,14 +228,16 @@ def _run_yara_python(
     extension_id: str,
     version: str,
     status: dict[str, Any],
+    targets: list[Path] | None = None,
 ) -> tuple[list[Finding], dict[str, Any]]:
     try:
         import yara  # type: ignore[import-not-found]
 
-        rules = yara.compile(filepath=str(_YARA_RULES))
+        rules = yara.compile(filepath=str(YARA_RULES))
         findings: list[Finding] = []
         scanned_files = 0
-        for path in root.rglob("*"):
+        scan_targets = targets if targets is not None else list(root.rglob("*"))
+        for path in scan_targets:
             if not path.is_file() or path.is_symlink():
                 continue
             scanned_files += 1
@@ -206,19 +246,10 @@ def _run_yara_python(
                     continue
                 rule_id, category, severity, evidence_class = _YARA_RULE_MAP[match.rule]
                 rel = path.relative_to(root).as_posix()
-                if _ignore_yara_match(match.rule, rel):
+                if _ignore_yara_match(match.rule, rel, path):
                     continue
-                findings.append(_provider_finding(
-                    extension_id,
-                    version,
-                    rule_id,
-                    category,
-                    severity,
-                    0.8 if evidence_class == "correlated" else 0.68,
-                    f"YARA rule {match.rule} matched {rel}.",
-                    [rel],
-                    "Inspect the matched bytes and validate the rule provenance before taking action.",
-                    {"provider": "yara", "provider_rule_id": match.rule, "evidence_class": evidence_class},
+                findings.append(_yara_finding(
+                    extension_id, version, match.rule, rule_id, category, severity, evidence_class, rel
                 ))
         status.update({"status": "completed", "finding_count": len(findings), "files_analyzed": scanned_files})
         return findings, status
@@ -227,24 +258,69 @@ def _run_yara_python(
         return [], status
 
 
-def _provider_status(name: str, executable: str | None, rules_path: Path) -> dict[str, Any]:
-    ruleset_hash = ""
-    if rules_path.is_file():
-        ruleset_hash = hashlib.sha256(rules_path.read_bytes()).hexdigest()
-    elif rules_path.is_dir():
-        digest = hashlib.sha256()
-        for rule in sorted(rules_path.rglob("*")):
-            if rule.is_file():
-                digest.update(rule.relative_to(rules_path).as_posix().encode("utf-8"))
-                digest.update(rule.read_bytes())
-        ruleset_hash = digest.hexdigest()
-    return {
-        "provider": name,
-        "status": "available" if executable else "unavailable",
-        "executable": executable or "",
-        "ruleset_hash": ruleset_hash,
-        "required": False,
-    }
+def _resolved_targets(
+    root: Path,
+    targets: dict[str, list[str]] | None,
+    provider: str,
+) -> list[Path] | None:
+    if targets is None:
+        return None
+    resolved_root = root.resolve()
+    selected: list[Path] = []
+    for rel in targets.get(provider, []):
+        candidate = root.joinpath(*str(rel).split("/"))
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(resolved_root)
+        except (OSError, ValueError):
+            continue
+        if resolved.is_file() and not candidate.is_symlink():
+            selected.append(resolved)
+    return selected
+
+
+def _has_valid_embedded_pe(path: Path) -> bool:
+    try:
+        if not path.is_file() or path.is_symlink() or path.stat().st_size < 68:
+            return False
+        with path.open("rb") as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            start = 1
+            while True:
+                base = data.find(b"MZ", start)
+                if base < 0:
+                    return False
+                if base + 64 <= len(data):
+                    pe_offset = int.from_bytes(data[base + 60:base + 64], "little")
+                    header = base + pe_offset
+                    if pe_offset >= 64 and header + 4 <= len(data) and data[header:header + 4] == b"PE\0\0":
+                        return True
+                start = base + 2
+    except (OSError, ValueError):
+        return False
+
+
+def _yara_finding(
+    extension_id: str,
+    version: str,
+    rule_name: str,
+    rule_id: str,
+    category: str,
+    severity: str,
+    evidence_class: str,
+    rel: str,
+) -> Finding:
+    return _provider_finding(
+        extension_id,
+        version,
+        rule_id,
+        category,
+        severity,
+        0.8 if evidence_class == "correlated" else 0.68,
+        f"YARA rule {rule_name} matched {rel}.",
+        [rel],
+        "Inspect the matched bytes and validate the rule provenance before taking action.",
+        {"provider": "yara", "provider_rule_id": rule_name, "evidence_class": evidence_class},
+    )
 
 
 def _provider_finding(

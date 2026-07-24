@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "guardlens"
-version = "0.3.4"
+version = "0.1.0"
 description = "Guardrails CLI for scanning locally installed extensions."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -41,7 +41,13 @@ include = ["guardrails_cli*", "ide_scanner*"]
 
 [tool.setuptools.package-data]
 guardrails_cli = ["assets/*.png", "engine_source.json"]
-ide_scanner = ["intelligence/*.json", "js_ast/*.js", "js_ast/*LICENSE*"]
+ide_scanner = [
+  "intelligence/*.json",
+  "js_ast/*.js",
+  "js_ast/*LICENSE*",
+  "provider_rules/semgrep/*.yml",
+  "provider_rules/yara/*.yar",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

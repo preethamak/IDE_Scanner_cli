@@ -45,7 +45,7 @@ def git(checkout: Path, *args: str) -> bytes:
         raise SystemExit(f"Could not read committed scanner source: {exc}") from exc
 
 
-def sync(checkout: Path, revision: str, repository: str) -> None:
+def sync(checkout: Path, revision: str) -> None:
     if len(revision) != 40 or any(character not in "0123456789abcdef" for character in revision.lower()):
         raise SystemExit("--revision must be a full 40-character Git commit SHA.")
     resolved = git(checkout, "rev-parse", "--verify", f"{revision}^{{commit}}").decode().strip()
@@ -71,8 +71,8 @@ def sync(checkout: Path, revision: str, repository: str) -> None:
         hashes[relative.as_posix()] = digest(destination)
 
     manifest = {
-        "schema_version": 1,
-        "source_repository": repository,
+        "schema_version": 2,
+        "source_component": "guardrails-scanner-runtime",
         "source_revision": revision.lower(),
         "files": hashes,
     }
@@ -106,7 +106,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Synchronize and verify Guardrails' bundled scanner engine.")
     parser.add_argument("--source-checkout", type=Path, help="Git checkout containing the committed scanner source.")
     parser.add_argument("--revision", help="Full source repository commit SHA.")
-    parser.add_argument("--repository", default="https://github.com/preethamak/IDE_Scanner")
     parser.add_argument("--check", action="store_true", help="Verify the bundled files against the recorded hashes.")
     args = parser.parse_args()
 
@@ -115,7 +114,7 @@ def main() -> int:
         return 0
     if args.source_checkout is None or not args.revision:
         parser.error("--source-checkout and --revision are required when synchronizing.")
-    sync(args.source_checkout.resolve(), args.revision, args.repository)
+    sync(args.source_checkout.resolve(), args.revision)
     check()
     return 0
 

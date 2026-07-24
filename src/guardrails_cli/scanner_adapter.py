@@ -56,10 +56,16 @@ def verify_engine_integrity(engine_root: Path | None = None) -> None:
 verify_engine_integrity()
 
 from ide_scanner.discovery import discover_from_path, discover_local_installations
+from ide_scanner.providers import provider_diagnostics
 from ide_scanner.registry import search_marketplace_extensions
 from ide_scanner.report_bundle import build_report_bundle
 from ide_scanner.rule_registry import rules_json
 from ide_scanner.scanner import scan_targets
+
+
+def analysis_provider_diagnostics(*, probe: bool = True) -> dict[str, dict[str, Any]]:
+    verify_engine_integrity()
+    return provider_diagnostics(probe=probe)
 
 
 def search_extensions(query: str, *, limit: int = 20) -> list[dict[str, Any]]:

@@ -73,6 +73,7 @@ TEXT_EXTS = {
     ".htm",
 }
 EXEC_TEXT_EXTS = {".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ps1", ".py", ".sh", ".ts", ".tsx"}
+DOCUMENTATION_PREVIEW_EXTS = {".md", ".markdown", ".rst"}
 BINARY_RISK_EXTS = {".dll", ".dylib", ".exe", ".node", ".so"}
 PACKED_RISK_EXTS = {".7z", ".asar", ".gz", ".jar", ".rar", ".tar", ".tgz", ".war", ".zip"}
 SKIP_DIRS = {".git", ".hg", ".svn"}
@@ -465,6 +466,20 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
         if suffix in BINARY_RISK_EXTS:
             continue
         if suffix not in TEXT_EXTS or (_is_ignored_static_asset(rel) and not is_entrypoint):
+            if (
+                _is_documentation_preview(rel)
+                and len(source_previews) < MAX_SOURCE_PREVIEWS
+                and file.stat().st_size <= MAX_SOURCE_PREVIEW_BYTES
+            ):
+                documentation = _read_text(file)
+                if documentation is not None:
+                    encoded = documentation.encode("utf-8")
+                    source_previews.append({
+                        "path": rel,
+                        "content": documentation,
+                        "content_sha256": hashlib.sha256(encoded).hexdigest(),
+                        "truncated": False,
+                    })
             continue
 
         text = _read_text(file)
@@ -537,7 +552,12 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
         ))
 
 
-    provider_findings, provider_statuses = run_static_providers(path, extension_id, version)
+    provider_findings, provider_statuses = run_static_providers(
+        path,
+        extension_id,
+        version,
+        targets=_static_provider_targets(files, path, analysis_coverage),
+    )
     findings.extend(provider_findings)
     findings = _dedupe_findings(findings)
     analysis_coverage["providers"] = {
@@ -3173,22 +3193,36 @@ def _finalize_analysis_coverage(coverage: dict[str, Any]) -> None:
         providers[name] = provider
         if provider.get("status") != "completed":
             limitations.append(f"Required provider {name} did not complete")
+    completed_required_providers = sorted(
+        name
+        for name in required_providers
+        if isinstance(providers.get(name), dict) and providers[name].get("status") == "completed"
+    )
+    coverage["required_providers"] = sorted(required_providers)
+    coverage["completed_required_providers"] = completed_required_providers
+    coverage["required_providers_complete"] = (
+        len(completed_required_providers) == len(required_providers)
+    )
     excluded_generated = list(coverage.get("excluded_generated_files") or [])
     coverage["skipped_generated_count"] = len(excluded_generated)
     denominator = len(candidates) + len(missing)
     if denominator:
-        coverage["coverage_percent"] = round(100 * len(analyzed & candidates) / denominator)
+        executable_file_coverage = round(100 * len(analyzed & candidates) / denominator)
     elif excluded_generated:
         # No analyzable entrypoint or hand-written executable file was reachable,
         # yet the artifact ships generated/minified runtime code. Reporting 100%
         # here would claim full analysis of code that was never inspected.
-        coverage["coverage_percent"] = 0
+        executable_file_coverage = 0
         limitations.append(
             f"No analyzable entrypoint was reachable; {len(excluded_generated)} generated/minified "
             "runtime file(s) were present but not analyzed"
         )
     else:
-        coverage["coverage_percent"] = 100
+        executable_file_coverage = 100
+    coverage["executable_file_coverage_percent"] = executable_file_coverage
+    # Compatibility alias for schema-v2 consumers. Analyzer completion is a
+    # separate invariant represented by required_providers_complete and status.
+    coverage["coverage_percent"] = executable_file_coverage
     coverage["limitations"] = limitations
     coverage["status"] = "complete" if not limitations else "incomplete"
 
@@ -3225,6 +3259,28 @@ def _is_ignored_static_asset(rel: str) -> bool:
         ".bundle.mjs",
         ".map",
     ))
+
+
+def _is_documentation_preview(rel: str) -> bool:
+    path = Path(rel)
+    return path.suffix.lower() in DOCUMENTATION_PREVIEW_EXTS and path.stem.lower() == "readme"
+
+
+def _static_provider_targets(
+    files: list[Path],
+    root: Path,
+    coverage: dict[str, Any],
+) -> dict[str, list[str]]:
+    semgrep = sorted(
+        str(rel)
+        for rel in coverage.get("executable_candidates") or []
+        if root.joinpath(*str(rel).split("/")).is_file()
+    )
+    # YARA remains an artifact-wide byte scanner. Rule-specific eligibility and
+    # format validation happen after a match; narrowing this list by filename would
+    # create blind spots for executable bytes hidden in arbitrary containers.
+    yara = [file.relative_to(root).as_posix() for file in files if not file.is_symlink()]
+    return {"semgrep": semgrep, "yara": sorted(set(yara))}
 
 
 def _is_generated_code_blob(rel: str, text: str) -> bool:

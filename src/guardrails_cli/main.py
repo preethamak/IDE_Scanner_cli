@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
-import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -15,13 +13,13 @@ from . import __version__
 from .exporters.html import export_html
 from .exporters.json_export import export_json
 from .exporters.markdown import export_markdown
+from .environment import doctor_checks
 from .help_manual import TOPICS, manual
 from .report_reader import read_report, report_view, validate_report
 from .scan_service import run_with_profile, scan_installed
 from .scanner_adapter import (
     discover_paths,
     display_report,
-    engine_identity,
     get_rules,
     installed_extensions,
     scan_marketplace,
@@ -33,7 +31,7 @@ from .ui.panels import banner, panel, section
 from .ui.prompts import confirm, prompt_choice, prompt_text
 from .ui.renderers import render_rules, render_scan_report
 from .ui.tables import key_values, table, terminal_width, truncate
-from .ui.theme import color, severity_label, severity_style, supports_color
+from .ui.theme import color, severity_label, severity_style
 
 
 EXPORT_FORMATS = ("terminal", "zip", "html", "md", "json")
@@ -399,17 +397,7 @@ def cmd_help(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(_args: argparse.Namespace) -> int:
-    installed = installed_extensions()
-    engine = engine_identity()
-    checks = [
-        ("Python", "OK", sys.version.split()[0]),
-        ("Scanner", "OK" if importlib.util.find_spec("ide_scanner") else "FAIL", f"engine {engine['version']} · build {engine['build'][:12]}"),
-        ("Node AST", "OK" if shutil.which("node") else "FAIL", shutil.which("node") or "node not found"),
-        ("Semgrep", "OK" if shutil.which("semgrep") else "WARN", shutil.which("semgrep") or "optional; required by deep profile"),
-        ("YARA", "OK" if importlib.util.find_spec("yara") else "WARN", "available" if importlib.util.find_spec("yara") else "optional; required by deep profile"),
-        ("Installed extensions", "OK" if installed else "WARN", f"{len(installed)} detected"),
-        ("Color terminal", "OK" if supports_color() else "WARN", "enabled" if supports_color() else "plain-text mode"),
-    ]
+    checks = doctor_checks()
     print(banner("Environment doctor"))
     print(table(["Check", "Status", "Detail"], [[name, _status(status), detail] for name, status, detail in checks], max_widths=[24, 10, 76]))
     return 0 if all(status != "FAIL" for _, status, _ in checks) else 4

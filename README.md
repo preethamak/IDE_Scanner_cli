@@ -12,6 +12,12 @@ pipx install guardlens
 
 The installed command is `guardrails`.
 
+For Deep Scan providers:
+
+```bash
+pipx install "guardlens[analysis]"
+```
+
 ## Use
 
 Open the interactive local scanner:
