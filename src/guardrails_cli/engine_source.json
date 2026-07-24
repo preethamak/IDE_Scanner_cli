@@ -31,10 +31,10 @@
     "rules.py": "8796e73bb31ec98b5e0b76a07ad45fc2a8133caeb22f6efe9335d3122c691257",
     "sandbox_runner.py": "ceec036df3a838cfb71db775cd79dcfe394bddd6dae9bfc0220a87a7d55090de",
     "scanner.py": "8faf923bdc34706acd96eb86226c88b3ac06ef5483c520dec56c1404f5e8bd18",
-    "service.py": "25e31ecd9ef1db382477ac21a33e632dd81a779208d0ca9df035312e841f5e07",
+    "service.py": "e18eed736a6ac186a420839647f00d5f040b07187578142b33b69249703ac964",
     "web_bridge.py": "cded6b1e2d0aa132f4c2b3153147c6db4a21ec410fa909cec228866fea826f89"
   },
   "schema_version": 2,
   "source_component": "guardrails-scanner-runtime",
-  "source_revision": "23957346bcffe17ef6cd6dcc63faf8d2b22259ee"
+  "source_revision": "8369cd09c383c875ab584ae3f42223a9cdf1b9a0"
 }

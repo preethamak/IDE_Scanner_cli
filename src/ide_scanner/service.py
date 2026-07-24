@@ -90,11 +90,19 @@ def execute_marketplace_job(
     job: dict[str, Any],
     scan: Callable[..., dict[str, Any]] = scan_targets,
 ) -> None:
+    from .scanner import DEEP_REQUIRED_PROVIDERS
+
     job["status"] = "running"
     job["stage"] = "downloading"
     store.write(job)
     try:
-        report = scan(marketplace_scan_ids=[job["extension_id"]], online=True, include_posture=False)
+        report = scan(
+            marketplace_scan_ids=[job["extension_id"]],
+            marketplace_version=job.get("version"),
+            online=True,
+            include_posture=False,
+            required_providers=DEEP_REQUIRED_PROVIDERS,
+        )
         bundle = build_report_bundle(report, profile="deep", source="marketplace")
         extension_rows = bundle.get("leaderboard", {}).get("extensions", [])
         if not extension_rows:
