@@ -661,6 +661,9 @@ def scan_vsix(path: Path, known_bad_hashes: dict[str, dict[str, Any]] | None = N
             report.artifact_inventory["source_artifact"] = original_path.name
             report.artifact_inventory["vsix_signature"] = _vsix_signature_status(tmp_root)
             _record_archive_anomalies(report, archive_anomalies)
+            report.instance_id = _stable_id(
+                f"vsix:{vsix_hash}:{report.extension_id.lower()}:{report.version}"
+            )
             report.artifact_identity = {
                 "extension_id": report.extension_id,
                 "version": report.version,

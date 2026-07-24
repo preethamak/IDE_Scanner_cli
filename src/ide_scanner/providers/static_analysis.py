@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mmap
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 from ..models import Finding
 from ..rules import score_finding
 from .runtime import (
+    SEMGREP_RULES,
     YARA_RULES,
     semgrep_config_arguments,
     semgrep_diagnostic,
@@ -29,6 +31,12 @@ _YARA_RULE_MAP = {
 }
 
 _YARA_NON_EXECUTABLE_SUFFIXES = {".map", ".md", ".txt", ".json", ".jsonc"}
+_SEMGREP_RULE_IDS = {
+    "credential-dataflow-to-network",
+    "decoded-payload-execution",
+    "untrusted-workspace-input-to-process",
+    "webview-message-to-process",
+}
 
 
 def _ignore_yara_match(rule_name: str, rel: str, path: Path) -> bool:
@@ -112,10 +120,27 @@ def _run_semgrep(
         "status": "completed" if result.returncode == 0 else "failed",
         "finding_count": len(findings),
         "error_count": len(errors),
-        "errors": [str(item.get("message") or item) for item in errors[:10] if isinstance(item, dict)],
-        "error": result.stderr.strip()[:500] if result.returncode else "",
+        "errors": [
+            _semgrep_diagnostic_text(str(item.get("message") or item), root)
+            for item in errors[:10]
+            if isinstance(item, dict)
+        ],
+        "error": _semgrep_diagnostic_text(result.stderr, root) if result.returncode else "",
     })
     return findings, status
+
+
+def _semgrep_diagnostic_text(value: str, root: Path) -> str:
+    """Bound provider diagnostics and remove machine-specific path prefixes."""
+    text = value.strip().replace(str(root.resolve()), "<artifact>")
+    text = text.replace(str(SEMGREP_RULES.resolve()), "<rules>")
+    for rule_id in _SEMGREP_RULE_IDS:
+        text = re.sub(
+            rf"(?:[A-Za-z0-9_-]+\.)+{re.escape(rule_id)}",
+            rule_id,
+            text,
+        )
+    return text[:500]
 
 
 def _semgrep_finding(item: dict[str, Any], root: Path, extension_id: str, version: str) -> Finding | None:
