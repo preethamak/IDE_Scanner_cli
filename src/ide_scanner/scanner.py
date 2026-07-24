@@ -3247,7 +3247,8 @@ def _is_ignored_static_asset(rel: str) -> bool:
         "/dist/",
         "/node_modules/",
     )
-    if normalized.startswith(generated_prefixes) or any(part in normalized for part in generated_parts):
+    rooted = f"/{normalized.lstrip('/')}"
+    if normalized.startswith(generated_prefixes) or any(part in rooted for part in generated_parts):
         return True
     name = Path(rel).name.lower()
     return name.endswith((

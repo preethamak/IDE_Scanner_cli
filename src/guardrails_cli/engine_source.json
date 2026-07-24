@@ -30,11 +30,11 @@
     "rule_registry.py": "473f5dac265adead2ffae156d6a45bf3e085f813b83ba5799e846d03e1fce071",
     "rules.py": "8796e73bb31ec98b5e0b76a07ad45fc2a8133caeb22f6efe9335d3122c691257",
     "sandbox_runner.py": "ceec036df3a838cfb71db775cd79dcfe394bddd6dae9bfc0220a87a7d55090de",
-    "scanner.py": "644c5d6cfa0ab58353594ccbb1ede42a7d4396e656473389612f497738679a18",
+    "scanner.py": "d7d7bfa85689f1144148513eeb47f01a8859034a225255af29d24df30215e179",
     "service.py": "25e31ecd9ef1db382477ac21a33e632dd81a779208d0ca9df035312e841f5e07",
     "web_bridge.py": "cded6b1e2d0aa132f4c2b3153147c6db4a21ec410fa909cec228866fea826f89"
   },
   "schema_version": 2,
   "source_component": "guardrails-scanner-runtime",
-  "source_revision": "45825fee4d0beb887109fa29b55ccb0a45c26743"
+  "source_revision": "7d7f8ded33e1d0c41a77f864949c0dc85f3a298c"
 }
