@@ -109,6 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Analysis boundary. Deep matches the website Deep Scan when its required providers are available.",
     )
     scan.add_argument("--online", action="store_true", help="Enable registry and dependency checks for local/file scans.")
+    scan.add_argument("--registry-snapshot", metavar="REPORT.json", help="Replay registry and dependency intelligence captured in an earlier JSON report.")
     scan.add_argument("--format", choices=EXPORT_FORMATS, default="terminal", help="Output or saved-report format.")
     scan.add_argument("--output", "--out", dest="output", help="Write the selected report format to this path.")
     scan.add_argument("--show-all", action="store_true", help="Print every installation in a multi-extension terminal report.")
@@ -173,7 +174,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if args.marketplace or args.marketplace_search:
         extension_id, version = _marketplace_target(args)
         print(color(f"Acquiring exact Marketplace artifact {extension_id}{f'@{version}' if version else ''}…", "brand_cyan"))
-        report = run_with_profile(args.profile, lambda: scan_marketplace(extension_id, version=version))
+        report = run_with_profile(
+            args.profile,
+            lambda: scan_marketplace(extension_id, version=version, registry_snapshot=args.registry_snapshot),
+        )
         source = "marketplace"
     elif args.file:
         targets = discover_paths(args.file)
@@ -184,7 +188,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
         print(color("Scanning the selected local artifact without executing extension code…", "brand_cyan"))
         report = run_with_profile(
             args.profile,
-            lambda: scan_paths([item["path"] for item in targets], online=args.online or args.profile == "deep"),
+            lambda: scan_paths(
+                [item["path"] for item in targets],
+                online=args.online or args.profile == "deep",
+                registry_snapshot=args.registry_snapshot,
+            ),
         )
         source = "file"
     else:

@@ -89,19 +89,35 @@ def installed_extensions() -> list[dict[str, Any]]:
     return sorted(rows, key=lambda item: (item["client"], item["display_name"].lower(), item["version"]))
 
 
-def scan_marketplace(extension_id: str, *, version: str | None = None) -> dict[str, Any]:
+def scan_marketplace(
+    extension_id: str,
+    *,
+    version: str | None = None,
+    registry_snapshot: str | Path | None = None,
+) -> dict[str, Any]:
     verify_engine_integrity()
     return scan_targets(
         marketplace_scan_ids=[extension_id],
         marketplace_version=version,
         online=True,
+        registry_snapshot_file=registry_snapshot,
         include_posture=False,
     )
 
 
-def scan_paths(paths: list[str | Path], *, online: bool = False) -> dict[str, Any]:
+def scan_paths(
+    paths: list[str | Path],
+    *,
+    online: bool = False,
+    registry_snapshot: str | Path | None = None,
+) -> dict[str, Any]:
     verify_engine_integrity()
-    return scan_targets(paths=[Path(item) for item in paths], online=online, include_posture=False)
+    return scan_targets(
+        paths=[Path(item) for item in paths],
+        online=online,
+        registry_snapshot_file=registry_snapshot,
+        include_posture=False,
+    )
 
 
 def discover_paths(path: str | Path) -> list[dict[str, str]]:

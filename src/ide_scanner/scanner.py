@@ -223,6 +223,7 @@ def scan_targets(
     known_bad_hashes_file: Path | str | None = None,
     threat_feed_file: Path | str | None = None,
     extension_advisories_file: Path | str | None = None,
+    registry_snapshot_file: Path | str | None = None,
     sandbox_observations_file: Path | str | None = None,
     previous_report_file: Path | str | None = None,
     include_posture: bool = True,
@@ -255,12 +256,18 @@ def scan_targets(
     advisory_bundle = _load_extension_advisories(extension_advisories_file)
     _apply_extension_advisories(extensions, advisory_bundle)
     _apply_sandbox_observations(extensions, _load_sandbox_observations(sandbox_observations_file))
-    registry = enrich_registry(extensions, online=online)
+    registry = (
+        _load_registry_snapshot(registry_snapshot_file)
+        if registry_snapshot_file is not None
+        else _capture_registry_snapshot(enrich_registry(extensions, online=online), source="live")
+    )
     _apply_registry_findings(extensions, registry["findings"])
     dependency_errors = [
         item for item in registry.get("errors", [])
         if isinstance(item, dict) and str(item.get("source") or "").startswith("osv")
     ]
+    registry_enabled = bool(registry.get("enabled"))
+    registry_identity = registry.get("snapshot") if isinstance(registry.get("snapshot"), dict) else {}
     for extension in extensions:
         acquisition_failure = str(extension.artifact_inventory.get("skipped_reason") or "") if extension.source == "marketplace-error" else ""
         providers = extension.analysis_coverage.setdefault("providers", {})
@@ -274,7 +281,8 @@ def scan_targets(
             }
         providers["dependency_intelligence"] = {
             "provider": "dependency_intelligence",
-            "status": "completed" if online and not dependency_errors else "failed" if online else "unavailable",
+            "status": "completed" if registry_enabled and not dependency_errors else "failed" if registry_enabled else "unavailable",
+            "snapshot_sha256": str(registry_identity.get("sha256") or ""),
             "error_count": len(dependency_errors),
             "required": False,
         }
@@ -302,7 +310,12 @@ def scan_targets(
             "status": str(advisory_bundle.get("status") or "unavailable"),
             "snapshot_version": str(advisory_bundle.get("snapshot_version") or "none"),
             "sha256": str(advisory_bundle.get("sha256") or ""),
-        }
+        },
+        "registry": {
+            "status": "completed" if registry_enabled and not registry.get("errors") else "failed" if registry_enabled else "unavailable",
+            "source": str(registry_identity.get("source") or "unavailable"),
+            "sha256": str(registry_identity.get("sha256") or ""),
+        },
     }
     return _build_report(
         extensions,
@@ -311,6 +324,49 @@ def scan_targets(
         include_posture=include_posture,
         intelligence=intelligence,
     )
+
+
+def _registry_snapshot_payload(registry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": bool(registry.get("enabled")),
+        "mode": str(registry.get("mode") or "disabled"),
+        "findings": list(registry.get("findings") or []),
+        "errors": list(registry.get("errors") or []),
+    }
+
+
+def _capture_registry_snapshot(registry: dict[str, Any], *, source: str) -> dict[str, Any]:
+    payload = _registry_snapshot_payload(registry)
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return {
+        **payload,
+        "snapshot": {
+            "schema_version": "1",
+            "source": source,
+            "sha256": digest,
+        },
+    }
+
+
+def _load_registry_snapshot(path: Path | str) -> dict[str, Any]:
+    snapshot_path = Path(path)
+    try:
+        parsed = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Registry intelligence snapshot could not be read: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("Registry intelligence snapshot must be a JSON object.")
+    candidate = parsed.get("registry_checks") if isinstance(parsed.get("registry_checks"), dict) else parsed
+    if not isinstance(candidate.get("findings"), list) or not isinstance(candidate.get("errors"), list):
+        raise ValueError("Registry intelligence snapshot must include findings and errors arrays.")
+    captured = _capture_registry_snapshot(candidate, source="replay")
+    claimed = candidate.get("snapshot") if isinstance(candidate.get("snapshot"), dict) else {}
+    claimed_digest = str(claimed.get("sha256") or "")
+    if claimed_digest and claimed_digest != captured["snapshot"]["sha256"]:
+        raise ValueError("Registry intelligence snapshot digest does not match its contents.")
+    return captured
 
 
 def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[str, dict[str, Any]] | None = None) -> ExtensionReport:

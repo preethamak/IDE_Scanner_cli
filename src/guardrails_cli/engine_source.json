@@ -9,7 +9,7 @@
     "benchmarks/adapters/protect_your_secrets.py": "b6be7211121b28b64eb9c4aece38f637b098dc1e3df3184c24b8075c07194b30",
     "benchmarks/runner.py": "9cd25959edbc03d220c27d64fbccd59b8e104eee7fdbbb2e75b86857b3d59e75",
     "classification_policy.py": "1ba7118d5cf6dc0803a93d9472e410283fe04c921ac99dd85b7b06593c5c6308",
-    "cli.py": "352c1b7ac02839bd02e842178581f5994f708b33880beb12a50ec69843c99e9c",
+    "cli.py": "3eeec6da2e5b027ef48fc056134830d6d9e96e4cfd044463a7fc67a3330e18d6",
     "core.py": "45357957474880baee4788e078c52b5dd36d51f84f7734e327f31a83d28f4802",
     "discovery.py": "69f9e1021cd09a109ad5487f7f58321c5fa562d417bf1130c216f1140c3b2a13",
     "intelligence/extension-advisories.json": "4d75db8be668fd3fef20b84cc1c63cdc3683d4caa1711d1cdb05af0e37c21b70",
@@ -27,11 +27,11 @@
     "rule_registry.py": "65ffac8ead9e2171662b85ecaf971c96bfa2d68c51ae8d9203f788f75f08e67c",
     "rules.py": "8796e73bb31ec98b5e0b76a07ad45fc2a8133caeb22f6efe9335d3122c691257",
     "sandbox_runner.py": "ceec036df3a838cfb71db775cd79dcfe394bddd6dae9bfc0220a87a7d55090de",
-    "scanner.py": "bfdea14dc3b5c7f163729eea5ce79a672a5b1197114f6e13aae7a80deefa7cdd",
+    "scanner.py": "91ffd4dcf925db43ba9ab1388913927fbe4f5e0b7333addfae200121d6090fcd",
     "service.py": "25e31ecd9ef1db382477ac21a33e632dd81a779208d0ca9df035312e841f5e07",
     "web_bridge.py": "cded6b1e2d0aa132f4c2b3153147c6db4a21ec410fa909cec228866fea826f89"
   },
   "schema_version": 1,
   "source_repository": "https://github.com/preethamak/IDE_Scanner",
-  "source_revision": "2fe0ece12ce1d2ac788e2aeca864b720c8076549"
+  "source_revision": "3d5af23965dd2a295879a292c4a779382b63fd09"
 }

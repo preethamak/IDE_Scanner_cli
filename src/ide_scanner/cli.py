@@ -32,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("--known-bad-hashes", help="JSON or line-based SHA-256 feed for known malicious artifacts.")
     scan.add_argument("--threat-feed", help="JSON feed of known malicious or suspicious extension ids.")
     scan.add_argument("--extension-advisories", help="Versioned JSON feed of exact extension vulnerability advisories. Defaults to the bundled snapshot.")
+    scan.add_argument("--registry-snapshot", help="Replay registry and dependency intelligence captured in an earlier JSON report.")
     scan.add_argument("--sandbox-observations", help="JSON observations from an external sandbox run. The scanner imports this evidence but does not execute extensions.")
     scan.add_argument("--previous-report", help="Previous ide-scanner JSON report to compare versions, dependencies, scores, and artifacts.")
     scan.add_argument("--out", "--output", dest="output", help="Write report to this file.")
@@ -96,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
             known_bad_hashes_file=args.known_bad_hashes,
             threat_feed_file=args.threat_feed,
             extension_advisories_file=args.extension_advisories,
+            registry_snapshot_file=args.registry_snapshot,
             sandbox_observations_file=args.sandbox_observations,
             previous_report_file=args.previous_report,
         )

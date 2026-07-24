@@ -67,6 +67,32 @@ class GuardrailsCliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("cannot be combined", error)
 
+    def test_marketplace_scan_forwards_registry_snapshot(self) -> None:
+        report = {"scan_id": "scan-1", "summary": {}, "extensions": []}
+        with (
+            patch("guardrails_cli.main.scan_marketplace", return_value=report) as scan,
+            patch("guardrails_cli.main.display_report", return_value=report),
+            patch("guardrails_cli.main.render_scan_report", return_value="ok"),
+        ):
+            code, _output, error = self.run_cli([
+                "scan",
+                "--marketplace",
+                "sample.extension@1.0.0",
+                "--profile",
+                "deep",
+                "--registry-snapshot",
+                "prior-report.json",
+                "--fail-on",
+                "never",
+            ])
+
+        self.assertEqual((code, error), (0, ""))
+        scan.assert_called_once_with(
+            "sample.extension",
+            version="1.0.0",
+            registry_snapshot="prior-report.json",
+        )
+
     def test_installed_search_filters_before_selection(self) -> None:
         rows = [
             {"client": "VS Code", "path": "/tmp/one", "extension_id": "sample.one", "display_name": "Alpha", "publisher": "sample", "version": "1.0.0"},
