@@ -2668,13 +2668,13 @@ def _apply_security_decision(extension: ExtensionReport) -> None:
     coverage = extension.analysis_coverage or extension.artifact_inventory.get("analysis_coverage") or {}
     incomplete = bool(extension.artifact_inventory.get("scan_incomplete")) or coverage.get("status") == "incomplete"
     extension.analysis_status = _analysis_status(extension, coverage, incomplete)
-    if extension.verdict == "malicious":
-        extension.decision = "block"
-        extension.decision_reason = "Confirmed malicious intelligence or an exact known-bad artifact matched."
-        return
     if incomplete:
         extension.decision = "incomplete"
         extension.decision_reason = str(extension.artifact_inventory.get("skipped_reason") or "Executable analysis did not complete.")
+        return
+    if extension.verdict == "malicious":
+        extension.decision = "block"
+        extension.decision_reason = "Confirmed malicious intelligence or an exact known-bad artifact matched."
         return
     blocking_rule_ids = _preventive_blocking_rule_ids(extension.findings)
     vulnerability_blocks = {

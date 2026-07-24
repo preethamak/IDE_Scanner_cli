@@ -176,27 +176,22 @@ def _run_yara(
     status["target_count"] = len(selected) if selected is not None else None
     if executable == "yara-python":
         return _run_yara_python(root, extension_id, version, status, selected)
-    scan_targets = selected if selected is not None else [root]
-    if not scan_targets:
+    if selected == []:
         status.update({"status": "completed", "finding_count": 0, "files_analyzed": 0, "error": ""})
         return [], status
     findings: list[Finding] = []
-    errors: list[str] = []
-    for target in scan_targets:
-        try:
-            result = subprocess.run(
-                [executable, "-N", str(YARA_RULES), str(target)],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            errors.append(f"{target}: {exc}")
-            continue
-        if result.returncode not in {0, 1}:
-            errors.append(result.stderr.strip()[:500] or f"{target}: exit {result.returncode}")
-            continue
+    try:
+        result = subprocess.run(
+            [executable, "-N", "-r", str(YARA_RULES), str(root)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        status.update({"status": "failed", "error_count": 1, "error": str(exc)})
+        return [], status
+    if result.returncode in {0, 1}:
         for line in result.stdout.splitlines():
             rule_name, separator, matched_path = line.partition(" ")
             if not separator or rule_name not in _YARA_RULE_MAP:
@@ -212,13 +207,13 @@ def _run_yara(
             findings.append(_yara_finding(
                 extension_id, version, rule_name, rule_id, category, severity, evidence_class, rel
             ))
+    error = result.stderr.strip()[:500] if result.returncode not in {0, 1} else ""
     status.update({
-        "status": "completed" if not errors else "failed",
+        "status": "completed" if result.returncode in {0, 1} else "failed",
         "finding_count": len(findings),
-        "files_analyzed": len(scan_targets) - len(errors),
-        "error_count": len(errors),
-        "errors": errors[:10],
-        "error": errors[0] if errors else "",
+        "files_analyzed": len(selected) if selected is not None else None,
+        "error_count": 0 if not error else 1,
+        "error": error,
     })
     return findings, status
 

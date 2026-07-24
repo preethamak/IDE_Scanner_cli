@@ -239,10 +239,15 @@ def _emit_terminal_brief(report: dict[str, Any]) -> None:
         risk = int(extension.get("risk_score") or 0)
         malware = int(extension.get("malware_score") or 0)
         coverage = extension.get("analysis_coverage") if isinstance(extension.get("analysis_coverage"), dict) else {}
-        percent = int(coverage.get("coverage_percent") or 0)
+        percent = int(coverage.get("executable_file_coverage_percent", coverage.get("coverage_percent")) or 0)
+        providers_complete = coverage.get("required_providers_complete") is True
         print(f"\n{extension_id}  {decision}")
         severity = str(extension.get("severity") or "INFO")
-        print(f"  Evidence severity {severity} | Review priority {risk}/100 | Malware evidence {malware}/100 | Coverage {percent}%")
+        provider_summary = "required analyzers complete" if providers_complete else "required analysis incomplete"
+        print(
+            f"  Evidence severity {severity} | Review priority {risk}/100 | Malware evidence {malware}/100 "
+            f"| Executable-file coverage {percent}% | {provider_summary}"
+        )
         reason = str(extension.get("decision_reason") or extension.get("verdict_reason") or "No decision explanation recorded.")
         print(f"  {reason}")
         findings = [item for item in extension.get("findings", []) if isinstance(item, dict)]

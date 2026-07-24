@@ -9,7 +9,7 @@
     "benchmarks/adapters/protect_your_secrets.py": "b6be7211121b28b64eb9c4aece38f637b098dc1e3df3184c24b8075c07194b30",
     "benchmarks/runner.py": "9cd25959edbc03d220c27d64fbccd59b8e104eee7fdbbb2e75b86857b3d59e75",
     "classification_policy.py": "1ba7118d5cf6dc0803a93d9472e410283fe04c921ac99dd85b7b06593c5c6308",
-    "cli.py": "3eeec6da2e5b027ef48fc056134830d6d9e96e4cfd044463a7fc67a3330e18d6",
+    "cli.py": "89eac733fe6768b96464a0bc6f56b5c6e1b5262088389bd46d06b7a65523536b",
     "core.py": "45357957474880baee4788e078c52b5dd36d51f84f7734e327f31a83d28f4802",
     "discovery.py": "69f9e1021cd09a109ad5487f7f58321c5fa562d417bf1130c216f1140c3b2a13",
     "intelligence/extension-advisories.json": "4d75db8be668fd3fef20b84cc1c63cdc3683d4caa1711d1cdb05af0e37c21b70",
@@ -23,18 +23,18 @@
     "provider_rules/yara/ide-scanner.yar": "c9995d359f336035dae5559b1aa5eeab4f7952dd2826fe0575bc33a7bffe5b3e",
     "providers/__init__.py": "80202f448abc5f4c91f804eca2abba276a19e67ac4c2a00dc7fad3a3859541b4",
     "providers/runtime.py": "192573cd30a1d65dc589af37f121e2e2f7ad0a75110d6f9e9f811d2e25b8e6b1",
-    "providers/static_analysis.py": "e20bcc7631bff195b1b95df043b1433b08699a8229daea4ec9e073f29561a672",
+    "providers/static_analysis.py": "ec3b078a9477e0d58ac354cfeaf5a01272577d9f770675ac0212613406beb4af",
     "public_outcomes.py": "0b69e8689a73698a6baf701c704995715294c8461c09e042c2077cfa51698831",
     "registry.py": "94d6c35b38f336720ab1a5542b20d7004a481805c840cf45d2755b9f4360225a",
     "report_bundle.py": "0e2ba9c890e8ea682b4109cf3aa5054e89424aa78ec88d9cb5434a31ffba279f",
     "rule_registry.py": "473f5dac265adead2ffae156d6a45bf3e085f813b83ba5799e846d03e1fce071",
     "rules.py": "8796e73bb31ec98b5e0b76a07ad45fc2a8133caeb22f6efe9335d3122c691257",
     "sandbox_runner.py": "ceec036df3a838cfb71db775cd79dcfe394bddd6dae9bfc0220a87a7d55090de",
-    "scanner.py": "b3eccb2aeb6fd6baa3599ef86aa644c10ed75d391ea71fb40d6516308e6c6dd6",
+    "scanner.py": "644c5d6cfa0ab58353594ccbb1ede42a7d4396e656473389612f497738679a18",
     "service.py": "25e31ecd9ef1db382477ac21a33e632dd81a779208d0ca9df035312e841f5e07",
     "web_bridge.py": "cded6b1e2d0aa132f4c2b3153147c6db4a21ec410fa909cec228866fea826f89"
   },
   "schema_version": 2,
   "source_component": "guardrails-scanner-runtime",
-  "source_revision": "3b57444934cc5ec920adc356424724ffa8819f88"
+  "source_revision": "e3c7fc24338b3899635fbc84fffd0b811e9ea77b"
 }
