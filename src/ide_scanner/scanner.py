@@ -328,18 +328,34 @@ def scan_targets(
 
 
 def _registry_snapshot_payload(registry: dict[str, Any]) -> dict[str, Any]:
-    return {
+    return _normalize_registry_snapshot_value({
         "enabled": bool(registry.get("enabled")),
         "mode": str(registry.get("mode") or "disabled"),
         "findings": list(registry.get("findings") or []),
         "errors": list(registry.get("errors") or []),
-    }
+    })
+
+
+def _normalize_registry_snapshot_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _normalize_registry_snapshot_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_registry_snapshot_value(item) for item in value]
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
 
 
 def _capture_registry_snapshot(registry: dict[str, Any], *, source: str) -> dict[str, Any]:
     payload = _registry_snapshot_payload(registry)
     digest = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
     ).hexdigest()
     return {
         **payload,
