@@ -15,6 +15,7 @@ from .runtime import (
     semgrep_diagnostic,
     semgrep_runtime_environment,
     semgrep_timeout_seconds,
+    run_bounded_process,
     yara_diagnostic,
 )
 
@@ -90,12 +91,9 @@ def _run_semgrep(
     ]
     try:
         with semgrep_runtime_environment() as environment:
-            result = subprocess.run(
+            result = run_bounded_process(
                 command,
-                capture_output=True,
-                text=True,
                 timeout=semgrep_timeout_seconds(),
-                check=False,
                 env=environment,
             )
         payload = json.loads(result.stdout or "{}")
@@ -181,12 +179,9 @@ def _run_yara(
         return [], status
     findings: list[Finding] = []
     try:
-        result = subprocess.run(
+        result = run_bounded_process(
             [executable, "-N", "-r", str(YARA_RULES), str(root)],
-            capture_output=True,
-            text=True,
             timeout=120,
-            check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         status.update({"status": "failed", "error_count": 1, "error": str(exc)})

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,59 @@ def find_runtime_executable(name: str) -> str | None:
     environment_bin = Path(sys.executable).parent
     adjacent = shutil.which(name, path=str(environment_bin))
     return adjacent or shutil.which(name)
+
+
+def run_bounded_process(
+    command: list[str],
+    *,
+    timeout: int | float,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a provider without allowing timed-out descendants to survive."""
+    popen_options: dict[str, Any] = {}
+    if os.name == "posix":
+        popen_options["start_new_session"] = True
+    elif os.name == "nt":
+        popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        **popen_options,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(process)
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+            return
+        except (OSError, subprocess.SubprocessError):
+            pass
+    process.kill()
 
 
 @contextmanager
@@ -112,17 +166,14 @@ def _probe_semgrep(status: dict[str, Any]) -> None:
         return
     try:
         with semgrep_runtime_environment() as environment:
-            result = subprocess.run(
+            result = run_bounded_process(
                 [
                     str(status["executable"]),
                     "scan",
                     "--disable-version-check",
                     "--version",
                 ],
-                capture_output=True,
-                text=True,
                 timeout=min(semgrep_timeout_seconds(), 20),
-                check=False,
                 env=environment,
             )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -147,12 +198,9 @@ def _probe_yara(status: dict[str, Any]) -> None:
             status.update({"status": "failed", "error": str(exc)})
         return
     try:
-        result = subprocess.run(
+        result = run_bounded_process(
             [str(status["executable"]), "--version"],
-            capture_output=True,
-            text=True,
             timeout=10,
-            check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         status.update({"status": "failed", "error": str(exc)})
