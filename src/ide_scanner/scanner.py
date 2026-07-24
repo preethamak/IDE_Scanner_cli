@@ -3243,6 +3243,7 @@ def _is_ignored_static_asset(rel: str) -> bool:
         "webviews/build/assets/",
     )
     generated_parts = (
+        "/build/assets/",
         "/build/static/js/",
         "/dist/",
         "/node_modules/",
@@ -3251,6 +3252,11 @@ def _is_ignored_static_asset(rel: str) -> bool:
     if normalized.startswith(generated_prefixes) or any(part in rooted for part in generated_parts):
         return True
     name = Path(rel).name.lower()
+    if name.endswith(".d.ts") or (
+        name.startswith(("chunk-", "chunk."))
+        and Path(rel).suffix.lower() in JS_AST_EXTS
+    ):
+        return True
     return name.endswith((
         ".chunk.js",
         ".chunk.mjs",
