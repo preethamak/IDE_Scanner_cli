@@ -11,12 +11,28 @@ import zipfile
 from importlib.resources import files
 from pathlib import Path
 
-from guardrails_cli.scanner_adapter import engine_identity, scan_paths, verify_engine_integrity, write_bundle
+from guardrails_cli.scanner_adapter import display_report, engine_identity, scan_paths, verify_engine_integrity, write_bundle
 from ide_scanner.classification_policy import POLICY_VERSION
 from ide_scanner.rule_registry import rules_json
 
 
 class EngineParityTests(unittest.TestCase):
+    def test_json_presentation_preserves_replayable_intelligence(self) -> None:
+        report = {
+            "scan_id": "scan-1",
+            "ruleset_version": "rules-1",
+            "policy_version": "policy-1",
+            "intelligence": {"registry": {"sha256": "a" * 64, "payload": {"findings": [], "errors": []}}},
+            "registry_checks": {"enabled": True, "findings": [], "errors": []},
+            "summary": {},
+            "extensions": [],
+        }
+
+        presented = display_report(report)
+
+        self.assertEqual(presented["metadata"]["intelligence_snapshot"], report["intelligence"])
+        self.assertEqual(presented["registry_checks"], report["registry_checks"])
+
     def test_vendored_engine_matches_its_source_manifest(self) -> None:
         from scripts.sync_vendored_engine import check
 

@@ -27,11 +27,11 @@
     "rule_registry.py": "65ffac8ead9e2171662b85ecaf971c96bfa2d68c51ae8d9203f788f75f08e67c",
     "rules.py": "8796e73bb31ec98b5e0b76a07ad45fc2a8133caeb22f6efe9335d3122c691257",
     "sandbox_runner.py": "ceec036df3a838cfb71db775cd79dcfe394bddd6dae9bfc0220a87a7d55090de",
-    "scanner.py": "91ffd4dcf925db43ba9ab1388913927fbe4f5e0b7333addfae200121d6090fcd",
+    "scanner.py": "8c16f2c40a15a5fe96abbeaba6e842a62971d3079dce96322524594ab8ee5410",
     "service.py": "25e31ecd9ef1db382477ac21a33e632dd81a779208d0ca9df035312e841f5e07",
     "web_bridge.py": "cded6b1e2d0aa132f4c2b3153147c6db4a21ec410fa909cec228866fea826f89"
   },
   "schema_version": 1,
   "source_repository": "https://github.com/preethamak/IDE_Scanner",
-  "source_revision": "3d5af23965dd2a295879a292c4a779382b63fd09"
+  "source_revision": "c6e3a418a8be56ed5607c01150239cf4b10e0da3"
 }

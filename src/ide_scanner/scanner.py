@@ -315,6 +315,7 @@ def scan_targets(
             "status": "completed" if registry_enabled and not registry.get("errors") else "failed" if registry_enabled else "unavailable",
             "source": str(registry_identity.get("source") or "unavailable"),
             "sha256": str(registry_identity.get("sha256") or ""),
+            "payload": _registry_snapshot_payload(registry),
         },
     }
     return _build_report(
@@ -358,11 +359,35 @@ def _load_registry_snapshot(path: Path | str) -> dict[str, Any]:
         raise ValueError(f"Registry intelligence snapshot could not be read: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ValueError("Registry intelligence snapshot must be a JSON object.")
-    candidate = parsed.get("registry_checks") if isinstance(parsed.get("registry_checks"), dict) else parsed
+    metadata = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else {}
+    metadata_intelligence = (
+        metadata.get("intelligence_snapshot")
+        if isinstance(metadata.get("intelligence_snapshot"), dict)
+        else {}
+    )
+    top_level_intelligence = parsed.get("intelligence") if isinstance(parsed.get("intelligence"), dict) else {}
+    registry_intelligence = (
+        metadata_intelligence.get("registry")
+        if isinstance(metadata_intelligence.get("registry"), dict)
+        else top_level_intelligence.get("registry")
+        if isinstance(top_level_intelligence.get("registry"), dict)
+        else {}
+    )
+    candidate = (
+        parsed.get("registry_checks")
+        if isinstance(parsed.get("registry_checks"), dict)
+        else registry_intelligence.get("payload")
+        if isinstance(registry_intelligence.get("payload"), dict)
+        else parsed
+    )
     if not isinstance(candidate.get("findings"), list) or not isinstance(candidate.get("errors"), list):
         raise ValueError("Registry intelligence snapshot must include findings and errors arrays.")
     captured = _capture_registry_snapshot(candidate, source="replay")
-    claimed = candidate.get("snapshot") if isinstance(candidate.get("snapshot"), dict) else {}
+    claimed = (
+        candidate.get("snapshot")
+        if isinstance(candidate.get("snapshot"), dict)
+        else registry_intelligence
+    )
     claimed_digest = str(claimed.get("sha256") or "")
     if claimed_digest and claimed_digest != captured["snapshot"]["sha256"]:
         raise ValueError("Registry intelligence snapshot digest does not match its contents.")

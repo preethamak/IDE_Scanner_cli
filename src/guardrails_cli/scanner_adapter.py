@@ -264,9 +264,11 @@ def display_report(report: dict[str, Any], *, source: str = "cli", profile: str 
             "cli_version": __version__,
             "ruleset_version": report.get("ruleset_version") or catalog.get("ruleset_version", "unknown"),
             "policy_version": report.get("policy_version") or catalog.get("policy_version", "unknown"),
+            "intelligence_snapshot": dict(report.get("intelligence") or {}),
             "profile": profile,
             "source": source,
         },
+        "registry_checks": dict(report.get("registry_checks") or {}),
         "summary": {**summary, "total_extensions": summary.get("total_extensions", len(extensions))},
         "extensions": extensions,
     }
