@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -129,10 +130,16 @@ def semgrep_diagnostic() -> dict[str, Any]:
         missing.append("Semgrep executable is not installed")
     if not ruleset_hash:
         missing.append("bundled Semgrep rules are unavailable")
+    version = ""
+    if not missing and executable:
+        version, version_error = _semgrep_runtime_version(executable)
+        if version_error:
+            missing.append(version_error)
     return {
         "provider": "semgrep",
         "status": "available" if not missing else "unavailable",
         "executable": executable or "",
+        "version": version,
         "rules_path": str(SEMGREP_RULES),
         "ruleset_hash": ruleset_hash,
         "error": "; ".join(missing),
@@ -150,10 +157,16 @@ def yara_diagnostic() -> dict[str, Any]:
         missing.append("YARA runtime is not installed")
     if not ruleset_hash:
         missing.append("bundled YARA rules are unavailable")
+    version = ""
+    if not missing and runtime:
+        version, version_error = _yara_runtime_version(runtime)
+        if version_error:
+            missing.append(version_error)
     return {
         "provider": "yara",
         "status": "available" if not missing else "unavailable",
         "executable": runtime,
+        "version": version,
         "rules_path": str(YARA_RULES),
         "ruleset_hash": ruleset_hash,
         "error": "; ".join(missing),
@@ -164,26 +177,11 @@ def yara_diagnostic() -> dict[str, Any]:
 def _probe_semgrep(status: dict[str, Any]) -> None:
     if status["status"] != "available":
         return
-    try:
-        with semgrep_runtime_environment() as environment:
-            result = run_bounded_process(
-                [
-                    str(status["executable"]),
-                    "scan",
-                    "--disable-version-check",
-                    "--version",
-                ],
-                timeout=min(semgrep_timeout_seconds(), 20),
-                env=environment,
-            )
-    except (OSError, subprocess.SubprocessError) as exc:
-        status.update({"status": "failed", "error": str(exc)})
-        return
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        status.update({"status": "failed", "error": detail[:500] or "Semgrep startup probe failed"})
-        return
-    status["version"] = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "unknown"
+    version, error = _semgrep_runtime_version(str(status["executable"]))
+    if error:
+        status.update({"status": "failed", "error": error})
+    else:
+        status["version"] = version
 
 
 def _probe_yara(status: dict[str, Any]) -> None:
@@ -197,16 +195,49 @@ def _probe_yara(status: dict[str, Any]) -> None:
         except Exception as exc:
             status.update({"status": "failed", "error": str(exc)})
         return
+    version, error = _yara_runtime_version(str(status["executable"]))
+    if error:
+        status.update({"status": "failed", "error": error})
+    else:
+        status["version"] = version
+
+
+@lru_cache(maxsize=8)
+def _semgrep_runtime_version(executable: str) -> tuple[str, str]:
     try:
-        result = run_bounded_process(
-            [str(status["executable"]), "--version"],
-            timeout=10,
-        )
+        with semgrep_runtime_environment() as environment:
+            result = run_bounded_process(
+                [executable, "scan", "--disable-version-check", "--version"],
+                timeout=min(semgrep_timeout_seconds(), 20),
+                env=environment,
+            )
     except (OSError, subprocess.SubprocessError) as exc:
-        status.update({"status": "failed", "error": str(exc)})
-        return
+        return "", f"Semgrep version probe failed: {exc}"
     if result.returncode != 0:
-        status.update({"status": "failed", "error": result.stderr.strip()[:500] or "YARA probe failed"})
+        detail = (result.stderr or result.stdout).strip()
+        return "", detail[:500] or "Semgrep version probe failed"
+    version = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+    return (version, "") if version else ("", "Semgrep version probe returned no version")
+
+
+@lru_cache(maxsize=8)
+def _yara_runtime_version(runtime: str) -> tuple[str, str]:
+    if runtime == "yara-python":
+        try:
+            import yara  # type: ignore[import-not-found]
+
+            version = str(getattr(yara, "__version__", "") or "")
+        except Exception as exc:
+            return "", f"YARA version probe failed: {exc}"
+        return (version, "") if version else ("", "YARA version probe returned no version")
+    try:
+        result = run_bounded_process([runtime, "--version"], timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "", f"YARA version probe failed: {exc}"
+    if result.returncode != 0:
+        return "", result.stderr.strip()[:500] or "YARA version probe failed"
+    version = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+    return (version, "") if version else ("", "YARA version probe returned no version")
 
 
 def _ruleset_hash(path: Path) -> str:
