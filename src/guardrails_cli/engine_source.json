@@ -9,7 +9,7 @@
     "benchmarks/adapters/protect_your_secrets.py": "b6be7211121b28b64eb9c4aece38f637b098dc1e3df3184c24b8075c07194b30",
     "benchmarks/runner.py": "9cd25959edbc03d220c27d64fbccd59b8e104eee7fdbbb2e75b86857b3d59e75",
     "classification_policy.py": "1ba7118d5cf6dc0803a93d9472e410283fe04c921ac99dd85b7b06593c5c6308",
-    "cli.py": "89eac733fe6768b96464a0bc6f56b5c6e1b5262088389bd46d06b7a65523536b",
+    "cli.py": "a5ce9f2614dd00833d1c87118e37f04dbc93dc901b4dfa0fda0937d28d0a7470",
     "core.py": "45357957474880baee4788e078c52b5dd36d51f84f7734e327f31a83d28f4802",
     "discovery.py": "69f9e1021cd09a109ad5487f7f58321c5fa562d417bf1130c216f1140c3b2a13",
     "intelligence/extension-advisories.json": "4d75db8be668fd3fef20b84cc1c63cdc3683d4caa1711d1cdb05af0e37c21b70",
@@ -30,11 +30,11 @@
     "rule_registry.py": "473f5dac265adead2ffae156d6a45bf3e085f813b83ba5799e846d03e1fce071",
     "rules.py": "8796e73bb31ec98b5e0b76a07ad45fc2a8133caeb22f6efe9335d3122c691257",
     "sandbox_runner.py": "ceec036df3a838cfb71db775cd79dcfe394bddd6dae9bfc0220a87a7d55090de",
-    "scanner.py": "101a33fb7cc8ac3c871ee1b26441f302754f288957d117389408e3b0cf51e305",
+    "scanner.py": "8faf923bdc34706acd96eb86226c88b3ac06ef5483c520dec56c1404f5e8bd18",
     "service.py": "25e31ecd9ef1db382477ac21a33e632dd81a779208d0ca9df035312e841f5e07",
     "web_bridge.py": "cded6b1e2d0aa132f4c2b3153147c6db4a21ec410fa909cec228866fea826f89"
   },
   "schema_version": 2,
   "source_component": "guardrails-scanner-runtime",
-  "source_revision": "c375697de8469d892c614aba63b6bea45fffb013"
+  "source_revision": "23957346bcffe17ef6cd6dcc63faf8d2b22259ee"
 }

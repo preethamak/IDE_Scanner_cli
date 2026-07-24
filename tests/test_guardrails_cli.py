@@ -91,6 +91,7 @@ class GuardrailsCliTests(unittest.TestCase):
             "sample.extension",
             version="1.0.0",
             registry_snapshot="prior-report.json",
+            required_providers=frozenset({"semgrep", "yara", "dependency_intelligence"}),
         )
 
     def test_installed_search_filters_before_selection(self) -> None:

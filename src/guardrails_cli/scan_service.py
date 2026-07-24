@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .scanner_adapter import display_report, scan_paths
+from .scanner_adapter import DEEP_REQUIRED_PROVIDERS, display_report, scan_paths
 from .snapshot import snapshot_installations
 
 
@@ -28,9 +27,10 @@ def scan_installed(
         update("Analyzing extension packages without executing their code…")
         report = run_with_profile(
             profile,
-            lambda: scan_paths(
+            lambda required_providers: scan_paths(
                 [row["path"] for row in snapshot_rows],
                 online=online or profile == "deep",
+                required_providers=required_providers,
             ),
         )
         attach_installation_context(report, snapshot_rows)
@@ -53,16 +53,9 @@ def attach_installation_context(report: dict[str, Any], rows: list[dict[str, Any
             extension["installation_path"] = context.get("original_path") or context["path"]
 
 
-def run_with_profile(profile: str, operation: Callable[[], dict[str, Any]]) -> dict[str, Any]:
-    previous = os.environ.get("IDE_SCANNER_REQUIRE_PROVIDERS")
-    if profile == "deep":
-        existing = {item.strip() for item in (previous or "").split(",") if item.strip()}
-        existing.update({"semgrep", "yara", "dependency_intelligence"})
-        os.environ["IDE_SCANNER_REQUIRE_PROVIDERS"] = ",".join(sorted(existing))
-    try:
-        return operation()
-    finally:
-        if previous is None:
-            os.environ.pop("IDE_SCANNER_REQUIRE_PROVIDERS", None)
-        else:
-            os.environ["IDE_SCANNER_REQUIRE_PROVIDERS"] = previous
+def run_with_profile(
+    profile: str,
+    operation: Callable[[frozenset[str]], dict[str, Any]],
+) -> dict[str, Any]:
+    required_providers = DEEP_REQUIRED_PROVIDERS if profile == "deep" else frozenset()
+    return operation(required_providers)

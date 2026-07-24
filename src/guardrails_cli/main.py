@@ -174,7 +174,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
         print(color(f"Acquiring exact Marketplace artifact {extension_id}{f'@{version}' if version else ''}…", "brand_cyan"))
         report = run_with_profile(
             args.profile,
-            lambda: scan_marketplace(extension_id, version=version, registry_snapshot=args.registry_snapshot),
+            lambda required_providers: scan_marketplace(
+                extension_id,
+                version=version,
+                registry_snapshot=args.registry_snapshot,
+                required_providers=required_providers,
+            ),
         )
         source = "marketplace"
     elif args.file:
@@ -186,10 +191,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
         print(color("Scanning the selected local artifact without executing extension code…", "brand_cyan"))
         report = run_with_profile(
             args.profile,
-            lambda: scan_paths(
+            lambda required_providers: scan_paths(
                 [item["path"] for item in targets],
                 online=args.online or args.profile == "deep",
                 registry_snapshot=args.registry_snapshot,
+                required_providers=required_providers,
             ),
         )
         source = "file"

@@ -60,7 +60,7 @@ from ide_scanner.providers import provider_diagnostics
 from ide_scanner.registry import search_marketplace_extensions
 from ide_scanner.report_bundle import build_report_bundle
 from ide_scanner.rule_registry import rules_json
-from ide_scanner.scanner import scan_targets
+from ide_scanner.scanner import DEEP_REQUIRED_PROVIDERS, scan_targets
 
 
 def analysis_provider_diagnostics(*, probe: bool = True) -> dict[str, dict[str, Any]]:
@@ -100,6 +100,7 @@ def scan_marketplace(
     *,
     version: str | None = None,
     registry_snapshot: str | Path | None = None,
+    required_providers: set[str] | frozenset[str] | None = None,
 ) -> dict[str, Any]:
     verify_engine_integrity()
     return _run_engine_scan(
@@ -109,6 +110,7 @@ def scan_marketplace(
             online=True,
             registry_snapshot_file=registry_snapshot,
             include_posture=False,
+            required_providers=required_providers,
         )
     )
 
@@ -118,6 +120,7 @@ def scan_paths(
     *,
     online: bool = False,
     registry_snapshot: str | Path | None = None,
+    required_providers: set[str] | frozenset[str] | None = None,
 ) -> dict[str, Any]:
     verify_engine_integrity()
     return _run_engine_scan(
@@ -126,6 +129,7 @@ def scan_paths(
             online=online,
             registry_snapshot_file=registry_snapshot,
             include_posture=False,
+            required_providers=required_providers,
         )
     )
 

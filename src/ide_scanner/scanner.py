@@ -76,6 +76,7 @@ EXEC_TEXT_EXTS = {".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ps1", ".py", 
 DOCUMENTATION_PREVIEW_EXTS = {".md", ".markdown", ".rst"}
 BINARY_RISK_EXTS = {".dll", ".dylib", ".exe", ".node", ".so"}
 PACKED_RISK_EXTS = {".7z", ".asar", ".gz", ".jar", ".rar", ".tar", ".tgz", ".war", ".zip"}
+DEEP_REQUIRED_PROVIDERS = frozenset({"semgrep", "yara", "dependency_intelligence"})
 SKIP_DIRS = {".git", ".hg", ".svn"}
 MAX_TEXT_BYTES = 64 * 1024 * 1024
 MAX_SOURCE_PREVIEW_BYTES = 200 * 1024
@@ -228,6 +229,7 @@ def scan_targets(
     sandbox_observations_file: Path | str | None = None,
     previous_report_file: Path | str | None = None,
     include_posture: bool = True,
+    required_providers: set[str] | frozenset[str] | None = None,
 ) -> dict[str, Any]:
     targets: list[dict[str, str]] = []
     root = Path.cwd()
@@ -269,6 +271,11 @@ def scan_targets(
     ]
     registry_enabled = bool(registry.get("enabled"))
     registry_identity = registry.get("snapshot") if isinstance(registry.get("snapshot"), dict) else {}
+    requested_providers = {
+        str(item).strip().lower()
+        for item in (required_providers or set())
+        if str(item).strip()
+    }
     for extension in extensions:
         acquisition_failure = str(extension.artifact_inventory.get("skipped_reason") or "") if extension.source == "marketplace-error" else ""
         providers = extension.analysis_coverage.setdefault("providers", {})
@@ -295,6 +302,16 @@ def scan_targets(
             "error_count": 0 if advisory_bundle.get("status") == "completed" else 1,
             "required": True,
         }
+        for provider_name in requested_providers:
+            provider = providers.setdefault(
+                provider_name,
+                {
+                    "provider": provider_name,
+                    "status": "unavailable",
+                    "error": "Required provider did not report a result",
+                },
+            )
+            provider["required"] = True
         _finalize_analysis_coverage(extension.analysis_coverage)
         extension.artifact_inventory["analysis_coverage"] = extension.analysis_coverage
         extension.artifact_inventory["scan_incomplete"] = extension.analysis_coverage["status"] != "complete"

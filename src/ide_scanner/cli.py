@@ -13,7 +13,7 @@ from .benchmarks.runner import run_credential_exposure_benchmark, write_benchmar
 from .discovery import discover_from_path, discover_local_installations
 from .report_bundle import iter_report_events, write_report_bundle
 from .sandbox_runner import run_sandbox
-from .scanner import scan_targets
+from .scanner import DEEP_REQUIRED_PROVIDERS, scan_targets
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -100,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
             registry_snapshot_file=args.registry_snapshot,
             sandbox_observations_file=args.sandbox_observations,
             previous_report_file=args.previous_report,
+            required_providers=DEEP_REQUIRED_PROVIDERS if args.profile == "deep" else None,
         )
         output_format = _scan_output_format(args.output, args.format)
         source = _scan_source(args.installed, args.path, args.extension_id, args.fixtures)

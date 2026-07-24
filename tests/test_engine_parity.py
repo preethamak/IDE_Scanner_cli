@@ -12,12 +12,22 @@ from importlib.resources import files
 from pathlib import Path
 
 from guardrails_cli.scanner_adapter import display_report, engine_identity, scan_paths, verify_engine_integrity, write_bundle
+from guardrails_cli.scan_service import run_with_profile
 from ide_scanner.providers.runtime import SEMGREP_RULES, YARA_RULES, provider_diagnostics
 from ide_scanner.classification_policy import POLICY_VERSION
 from ide_scanner.rule_registry import rules_json
 
 
 class EngineParityTests(unittest.TestCase):
+    def test_deep_profile_uses_shared_engine_provider_contract(self) -> None:
+        observed = {}
+        run_with_profile("deep", lambda providers: observed.update(required=providers) or {})
+
+        self.assertEqual(
+            observed["required"],
+            frozenset({"semgrep", "yara", "dependency_intelligence"}),
+        )
+
     def test_json_presentation_preserves_replayable_intelligence(self) -> None:
         report = {
             "scan_id": "scan-1",
