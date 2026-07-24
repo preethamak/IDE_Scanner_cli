@@ -365,10 +365,18 @@ def _load_registry_snapshot(path: Path | str) -> dict[str, Any]:
         if isinstance(metadata.get("intelligence_snapshot"), dict)
         else {}
     )
+    scan = parsed.get("scan") if isinstance(parsed.get("scan"), dict) else {}
+    scan_intelligence = (
+        scan.get("intelligence_snapshot")
+        if isinstance(scan.get("intelligence_snapshot"), dict)
+        else {}
+    )
     top_level_intelligence = parsed.get("intelligence") if isinstance(parsed.get("intelligence"), dict) else {}
     registry_intelligence = (
         metadata_intelligence.get("registry")
         if isinstance(metadata_intelligence.get("registry"), dict)
+        else scan_intelligence.get("registry")
+        if isinstance(scan_intelligence.get("registry"), dict)
         else top_level_intelligence.get("registry")
         if isinstance(top_level_intelligence.get("registry"), dict)
         else {}
