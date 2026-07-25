@@ -26,7 +26,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-analysis = ["semgrep>=1.100,<2", "yara-python>=4.5,<5"]
+analysis = ["semgrep==1.164.0", "yara-python==4.5.4"]
 dev = ["build>=1.2", "twine>=6"]
 
 [project.scripts]
