@@ -22,19 +22,19 @@
     "provider_rules/semgrep/vscode-security.yml": "8a70e439494ab532052ba72b272605165b8d4b5ca7d75fec939cc40289add60f",
     "provider_rules/yara/ide-scanner.yar": "c9995d359f336035dae5559b1aa5eeab4f7952dd2826fe0575bc33a7bffe5b3e",
     "providers/__init__.py": "80202f448abc5f4c91f804eca2abba276a19e67ac4c2a00dc7fad3a3859541b4",
-    "providers/runtime.py": "658d9a10318db10d8e851c79af39830c50921babdff507911557eaea968efc49",
-    "providers/static_analysis.py": "fdeeb82f5b69c51716b2dcd59e18099d60ee6b815d499d7afd6838fa7fef924e",
+    "providers/runtime.py": "a50e271da27974af83eed49ff8df75edf441fa7923b479be553d3614a1cffcb9",
+    "providers/static_analysis.py": "ecb1beac9dfeba806b66893ab8c163936d65ffbc4767bad7c3dfb6cf259b9ba4",
     "public_outcomes.py": "0b69e8689a73698a6baf701c704995715294c8461c09e042c2077cfa51698831",
     "registry.py": "94d6c35b38f336720ab1a5542b20d7004a481805c840cf45d2755b9f4360225a",
     "report_bundle.py": "0e2ba9c890e8ea682b4109cf3aa5054e89424aa78ec88d9cb5434a31ffba279f",
     "rule_registry.py": "473f5dac265adead2ffae156d6a45bf3e085f813b83ba5799e846d03e1fce071",
     "rules.py": "8796e73bb31ec98b5e0b76a07ad45fc2a8133caeb22f6efe9335d3122c691257",
     "sandbox_runner.py": "ceec036df3a838cfb71db775cd79dcfe394bddd6dae9bfc0220a87a7d55090de",
-    "scanner.py": "e0fe844b1a26c3971ca47c5b2d6b151c71c0fc8f95ab6d8767ab253e7fc4641a",
+    "scanner.py": "cb02d1202acfe8b8969e802bd8c4019207e2de204fee362b2adf3f0baad21141",
     "service.py": "e18eed736a6ac186a420839647f00d5f040b07187578142b33b69249703ac964",
     "web_bridge.py": "cded6b1e2d0aa132f4c2b3153147c6db4a21ec410fa909cec228866fea826f89"
   },
   "schema_version": 2,
   "source_component": "guardrails-scanner-runtime",
-  "source_revision": "8ce1b32e4df9d545bff198cef1865f0d055130cc"
+  "source_revision": "eada4d237e6aa91237d0fa3390da4760f3c449ef"
 }

@@ -17,6 +17,8 @@ from typing import Any, Iterator
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 SEMGREP_RULES = _PACKAGE_ROOT / "provider_rules" / "semgrep"
 YARA_RULES = _PACKAGE_ROOT / "provider_rules" / "yara" / "ide-scanner.yar"
+SEMGREP_MAX_TARGET_BYTES = 256 * 1024
+SEMGREP_RULE_TIMEOUT_SECONDS = 15
 
 
 def semgrep_timeout_seconds() -> int:

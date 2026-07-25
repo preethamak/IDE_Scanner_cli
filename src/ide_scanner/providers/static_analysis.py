@@ -12,6 +12,8 @@ from ..models import Finding
 from ..rules import score_finding
 from .runtime import (
     SEMGREP_RULES,
+    SEMGREP_MAX_TARGET_BYTES,
+    SEMGREP_RULE_TIMEOUT_SECONDS,
     YARA_RULES,
     semgrep_config_arguments,
     semgrep_diagnostic,
@@ -94,7 +96,8 @@ def _run_semgrep(
         "--disable-version-check",
         "--no-git-ignore",
         "--jobs", "1",
-        "--max-target-bytes", str(10 * 1024 * 1024),
+        "--timeout", str(SEMGREP_RULE_TIMEOUT_SECONDS),
+        "--max-target-bytes", str(SEMGREP_MAX_TARGET_BYTES),
         *(str(path) for path in selected),
     ]
     try:
@@ -109,6 +112,14 @@ def _run_semgrep(
         status.update({"status": "failed", "error": str(exc)})
         return [], status
     errors = payload.get("errors") if isinstance(payload.get("errors"), list) else []
+    unsupported = [
+        item for item in errors
+        if isinstance(item, dict) and _semgrep_unsupported_target_error(item)
+    ]
+    blocking_errors = [
+        item for item in errors
+        if not (isinstance(item, dict) and _semgrep_unsupported_target_error(item))
+    ]
     findings = [
         finding
         for item in payload.get("results") or []
@@ -116,19 +127,27 @@ def _run_semgrep(
         for finding in [_semgrep_finding(item, root, extension_id, version)]
         if finding is not None
     ]
-    provider_completed = result.returncode == 0 and not errors
+    provider_completed = result.returncode == 0 and not blocking_errors
     status.update({
         "status": "completed" if provider_completed else "failed",
         "finding_count": len(findings),
-        "error_count": len(errors),
+        "error_count": len(blocking_errors),
         "errors": [
             _semgrep_diagnostic_text(str(item.get("message") or item), root)
-            for item in errors[:10]
+            for item in blocking_errors[:10]
             if isinstance(item, dict)
+        ],
+        "unsupported_parse_error_count": len(unsupported),
+        "unsupported_targets": [
+            _semgrep_diagnostic_text(str(item.get("message") or item), root)
+            for item in unsupported[:50]
         ],
         "error": (
             _semgrep_diagnostic_text(result.stderr, root)
-            or (f"Semgrep reported {len(errors)} target analysis error(s)" if errors else "")
+            or (
+                f"Semgrep reported {len(blocking_errors)} target analysis error(s)"
+                if blocking_errors else ""
+            )
         ) if not provider_completed else "",
     })
     return findings, status
@@ -145,6 +164,17 @@ def _semgrep_diagnostic_text(value: str, root: Path) -> str:
             text,
         )
     return text[:500]
+
+
+def _semgrep_unsupported_target_error(item: dict[str, Any]) -> bool:
+    """Identify parser incompatibility, not resource or execution failure."""
+    error_type = str(item.get("type") or "").lower()
+    message = str(item.get("message") or "").lower()
+    return (
+        "parse error" in error_type
+        or "syntax error" in error_type
+        or message.startswith("syntax error at line ")
+    )
 
 
 def _semgrep_finding(item: dict[str, Any], root: Path, extension_id: str, version: str) -> Finding | None:

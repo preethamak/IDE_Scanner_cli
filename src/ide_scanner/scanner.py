@@ -33,6 +33,7 @@ from .public_outcomes import apply_public_assessment
 from .rule_registry import RULESET_VERSION
 from .posture import scan_posture, summarize_posture
 from .providers import run_static_providers
+from .providers.runtime import SEMGREP_MAX_TARGET_BYTES
 from .registry import (
     MarketplaceDownloadError,
     _degzip_if_needed,
@@ -86,6 +87,7 @@ GENERATED_BLOB_BYTES = 10 * 1024 * 1024
 # Treat a long, nearly line-free JavaScript artifact as generated once it is
 # large enough that character proximity no longer represents source locality.
 MINIFIED_BLOB_BYTES = 256 * 1024
+SEMGREP_MINIFIED_SOURCE_BYTES = 16 * 1024
 MAX_ARCHIVE_FILES = 100_000
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_ARCHIVE_COMPRESSION_RATIO = 100
@@ -507,11 +509,12 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
         if file.stat().st_size > MAX_TEXT_BYTES:
             analysis_coverage["oversized_files"].append(rel)
             continue
-        if len(source_previews) < MAX_SOURCE_PREVIEWS and len(text.encode("utf-8")) <= MAX_SOURCE_PREVIEW_BYTES:
+        encoded_text = text.encode("utf-8")
+        if len(source_previews) < MAX_SOURCE_PREVIEWS and len(encoded_text) <= MAX_SOURCE_PREVIEW_BYTES:
             source_previews.append({
                 "path": rel,
                 "content": text,
-                "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "content_sha256": hashlib.sha256(encoded_text).hexdigest(),
                 "truncated": False,
             })
         scanned_files += 1
@@ -521,6 +524,14 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
         # turning identical source into a resource-dependent timeout.
         if suffix in JS_AST_EXTS:
             generated_blob = _is_generated_code_blob(rel, text)
+            semgrep_exclusion = _semgrep_scope_exclusion(text, len(encoded_text))
+            if semgrep_exclusion:
+                analysis_coverage["provider_scopes"]["semgrep"]["excluded_files"].append({
+                    "path": rel,
+                    "reason": semgrep_exclusion,
+                })
+            else:
+                analysis_coverage["provider_scopes"]["semgrep"]["eligible_files"].append(rel)
             if is_entrypoint or not generated_blob:
                 status = _add_ast_findings(extension_id, version, rel, text, findings, generated=generated_blob)
                 js_ast_statuses.append(status)
@@ -577,6 +588,15 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
     )
     findings.extend(provider_findings)
     findings = _dedupe_findings(findings)
+    semgrep_scope = analysis_coverage["provider_scopes"]["semgrep"]
+    provider_statuses["semgrep"].update({
+        "scope": (
+            "source-like JavaScript/TypeScript up to "
+            f"{SEMGREP_MAX_TARGET_BYTES:,} bytes per file"
+        ),
+        "eligible_file_count": len(semgrep_scope["eligible_files"]),
+        "excluded_file_count": len(semgrep_scope["excluded_files"]),
+    })
     analysis_coverage["providers"] = {
         "native_static": {"provider": "native_static", "status": "completed", "required": True},
         "javascript_ast": _javascript_ast_provider_status(js_ast_statuses, js_ast_failed_paths),
@@ -3175,6 +3195,16 @@ def _new_analysis_coverage(files: list[Path], entrypoints: set[str], path: Path)
         "oversized_files": [],
         "limitations": [],
         "providers": {},
+        "provider_scopes": {
+            "semgrep": {
+                "eligible_files": [],
+                "excluded_files": [
+                    {"path": rel, "reason": "generated or vendored path"}
+                    for rel in excluded_generated
+                    if Path(rel).suffix.lower() in JS_AST_EXTS
+                ],
+            },
+        },
     }
 
 
@@ -3302,7 +3332,11 @@ def _static_provider_targets(
 ) -> dict[str, list[str]]:
     semgrep = sorted(
         str(rel)
-        for rel in coverage.get("executable_candidates") or []
+        for rel in (
+            (coverage.get("provider_scopes") or {})
+            .get("semgrep", {})
+            .get("eligible_files", [])
+        )
         if root.joinpath(*str(rel).split("/")).is_file()
     )
     # YARA remains an artifact-wide byte scanner. Rule-specific eligibility and
@@ -3324,6 +3358,23 @@ def _is_generated_code_blob(rel: str, text: str) -> bool:
     if len(text) >= MINIFIED_BLOB_BYTES and len(text) / max(1, newline_count + 1) > 500:
         return True
     return False
+
+
+def _semgrep_scope_exclusion(text: str, byte_length: int | None = None) -> str | None:
+    """Bound Semgrep to source-like inputs while other analyzers cover bundles.
+
+    Semgrep's taint engine is not a byte scanner: webpack chunks and multi-MiB
+    generated bundles routinely exceed its per-rule parser budget. Native
+    static analysis, the bounded JavaScript AST analyzer, and YARA still inspect
+    these files; the provider-specific exclusion remains explicit in coverage.
+    """
+    size = byte_length if byte_length is not None else len(text.encode("utf-8"))
+    if size > SEMGREP_MAX_TARGET_BYTES:
+        return f"exceeds Semgrep's {SEMGREP_MAX_TARGET_BYTES:,}-byte source limit"
+    lines = text.count("\n") + 1
+    if size >= SEMGREP_MINIFIED_SOURCE_BYTES and len(text) / lines > 500:
+        return "minified/generated line density is outside Semgrep's source scope"
+    return None
 
 
 def _read_manifest_status(path: Path) -> tuple[dict[str, Any], str]:
