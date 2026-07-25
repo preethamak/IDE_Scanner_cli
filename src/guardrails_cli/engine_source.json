@@ -23,18 +23,18 @@
     "provider_rules/yara/ide-scanner.yar": "c9995d359f336035dae5559b1aa5eeab4f7952dd2826fe0575bc33a7bffe5b3e",
     "providers/__init__.py": "80202f448abc5f4c91f804eca2abba276a19e67ac4c2a00dc7fad3a3859541b4",
     "providers/runtime.py": "658d9a10318db10d8e851c79af39830c50921babdff507911557eaea968efc49",
-    "providers/static_analysis.py": "20521a396e74b328051523dd98d4b742afc0b410ec7aeba1811854ef9aea390b",
+    "providers/static_analysis.py": "fdeeb82f5b69c51716b2dcd59e18099d60ee6b815d499d7afd6838fa7fef924e",
     "public_outcomes.py": "0b69e8689a73698a6baf701c704995715294c8461c09e042c2077cfa51698831",
     "registry.py": "94d6c35b38f336720ab1a5542b20d7004a481805c840cf45d2755b9f4360225a",
     "report_bundle.py": "0e2ba9c890e8ea682b4109cf3aa5054e89424aa78ec88d9cb5434a31ffba279f",
     "rule_registry.py": "473f5dac265adead2ffae156d6a45bf3e085f813b83ba5799e846d03e1fce071",
     "rules.py": "8796e73bb31ec98b5e0b76a07ad45fc2a8133caeb22f6efe9335d3122c691257",
     "sandbox_runner.py": "ceec036df3a838cfb71db775cd79dcfe394bddd6dae9bfc0220a87a7d55090de",
-    "scanner.py": "1bc9ce70e498614fd279ae132b989d2676d8e75a0b368f1377127f22c60a6520",
+    "scanner.py": "4aec7873464baf2f1984a117f67f6aaa2cd73890476e359609d1f40a39fd7dd8",
     "service.py": "e18eed736a6ac186a420839647f00d5f040b07187578142b33b69249703ac964",
     "web_bridge.py": "cded6b1e2d0aa132f4c2b3153147c6db4a21ec410fa909cec228866fea826f89"
   },
   "schema_version": 2,
   "source_component": "guardrails-scanner-runtime",
-  "source_revision": "860e67f312024867f7cd64ca720ba95ac0bba9b0"
+  "source_revision": "c934421d79069027940c5366b26ace38a40f5c25"
 }

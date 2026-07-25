@@ -116,8 +116,9 @@ def _run_semgrep(
         for finding in [_semgrep_finding(item, root, extension_id, version)]
         if finding is not None
     ]
+    provider_completed = result.returncode == 0 and not errors
     status.update({
-        "status": "completed" if result.returncode == 0 else "failed",
+        "status": "completed" if provider_completed else "failed",
         "finding_count": len(findings),
         "error_count": len(errors),
         "errors": [
@@ -125,7 +126,10 @@ def _run_semgrep(
             for item in errors[:10]
             if isinstance(item, dict)
         ],
-        "error": _semgrep_diagnostic_text(result.stderr, root) if result.returncode else "",
+        "error": (
+            _semgrep_diagnostic_text(result.stderr, root)
+            or (f"Semgrep reported {len(errors)} target analysis error(s)" if errors else "")
+        ) if not provider_completed else "",
     })
     return findings, status
 

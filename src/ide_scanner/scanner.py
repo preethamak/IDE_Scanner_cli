@@ -3265,7 +3265,6 @@ def _is_ignored_static_asset(rel: str) -> bool:
     generated_parts = (
         "/build/assets/",
         "/build/static/js/",
-        "/dist/",
         "/node_modules/",
     )
     rooted = f"/{normalized.lstrip('/')}"
