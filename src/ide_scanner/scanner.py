@@ -2688,19 +2688,18 @@ def _apply_security_decision(extension: ExtensionReport) -> None:
     coverage = extension.analysis_coverage or extension.artifact_inventory.get("analysis_coverage") or {}
     incomplete = bool(extension.artifact_inventory.get("scan_incomplete")) or coverage.get("status") == "incomplete"
     extension.analysis_status = _analysis_status(extension, coverage, incomplete)
-    if incomplete:
-        extension.decision = "incomplete"
-        extension.decision_reason = str(extension.artifact_inventory.get("skipped_reason") or "Executable analysis did not complete.")
-        return
-    if extension.verdict == "malicious":
-        extension.decision = "block"
-        extension.decision_reason = "Confirmed malicious intelligence or an exact known-bad artifact matched."
-        return
     blocking_rule_ids = _preventive_blocking_rule_ids(extension.findings)
     vulnerability_blocks = {
         finding.rule_id for finding in extension.findings
         if finding_actionability(finding) == "block" and _finding_evidence_class(finding) == "vulnerability"
     }
+    # Analysis completeness and enforcement are independent invariants.
+    # Actionable block evidence remains enforceable even if another provider
+    # fails; an incomplete scan must never become an approval.
+    if extension.verdict == "malicious":
+        extension.decision = "block"
+        extension.decision_reason = "Confirmed malicious intelligence or an exact known-bad artifact matched."
+        return
     if vulnerability_blocks:
         extension.decision = "block"
         extension.decision_reason = (
@@ -2714,6 +2713,10 @@ def _apply_security_decision(extension: ExtensionReport) -> None:
             "Prevent execution pending review: high-confidence abuse-chain evidence matched "
             f"({', '.join(sorted(blocking_rule_ids))}). This is a preventive policy decision, not a confirmed-malicious label."
         )
+        return
+    if incomplete:
+        extension.decision = "incomplete"
+        extension.decision_reason = str(extension.artifact_inventory.get("skipped_reason") or "Executable analysis did not complete.")
         return
     added_capabilities = list(extension.baseline_diff.get("added_capabilities") or [])
     added_findings = list(extension.baseline_diff.get("added_findings") or [])
