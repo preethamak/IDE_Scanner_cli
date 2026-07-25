@@ -100,6 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--extension", action="append", default=[], help="Scan this installed extension ID; repeat for more than one.")
     scan.add_argument("--select", help="Select displayed rows, for example 1,3-5 or all.")
     scan.add_argument("--version", help="Exact Marketplace version; may also be supplied as ID@VERSION.")
+    scan.add_argument("--target-platform", help="Exact Marketplace artifact variant, for example darwin-x64.")
     scan.add_argument(
         "--profile",
         choices=("offline", "standard", "deep"),
@@ -177,6 +178,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             lambda required_providers: scan_marketplace(
                 extension_id,
                 version=version,
+                target_platform=args.target_platform,
                 registry_snapshot=args.registry_snapshot,
                 required_providers=required_providers,
             ),
@@ -628,7 +630,7 @@ def _scan_namespace(**overrides: Any) -> argparse.Namespace:
     defaults = {
         "file": None, "marketplace": None, "marketplace_search": None,
         "all": False, "ide": None, "search": "", "extension": [], "select": None,
-        "version": None, "profile": "standard", "online": False,
+        "version": None, "target_platform": None, "profile": "standard", "online": False,
         "format": "terminal", "output": None, "show_all": False, "yes": False, "fail_on": "block",
     }
     defaults.update(overrides)

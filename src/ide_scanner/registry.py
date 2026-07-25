@@ -29,6 +29,7 @@ MAX_VSIX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 MAX_CONFIGURED_VSIX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 VSIX_DOWNLOAD_TIMEOUT = 30
 EXTENSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9][A-Za-z0-9._-]*$")
+TARGET_PLATFORM_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 
 class MarketplaceDownloadError(RuntimeError):
@@ -136,6 +137,7 @@ def parse_marketplace_reference(value: str) -> str:
 def download_marketplace_vsix(
     extension_id: str,
     version: str | None = None,
+    target_platform: str | None = None,
     destination_dir: Path | str | None = None,
     max_bytes: int | None = None,
     timeout: int | None = None,
@@ -149,6 +151,9 @@ def download_marketplace_vsix(
     max_bytes = _bounded_positive_env("IDE_SCANNER_MAX_VSIX_BYTES", MAX_VSIX_DOWNLOAD_BYTES, MAX_CONFIGURED_VSIX_DOWNLOAD_BYTES) if max_bytes is None else max_bytes
     timeout = _bounded_positive_env("IDE_SCANNER_VSIX_DOWNLOAD_TIMEOUT", VSIX_DOWNLOAD_TIMEOUT, 600) if timeout is None else timeout
     resolved_id = parse_marketplace_reference(extension_id)
+    target_platform = str(target_platform or "").strip().lower() or None
+    if target_platform and not TARGET_PLATFORM_RE.fullmatch(target_platform):
+        raise MarketplaceDownloadError("Marketplace target platform is invalid.")
     metadata, error = _fetch_marketplace_metadata(resolved_id)
     if error or not metadata or not metadata.get("found"):
         metadata, openvsx_error = _fetch_openvsx_metadata(resolved_id)
@@ -157,6 +162,8 @@ def download_marketplace_vsix(
             raise MarketplaceDownloadError(f"Registry lookup failed for {resolved_id}: {reasons}")
     if not metadata or not metadata.get("found"):
         raise MarketplaceDownloadError(f"Extension {resolved_id} was not found on VS Marketplace or Open VSX.")
+    if target_platform and metadata.get("registry") == "openvsx":
+        raise MarketplaceDownloadError("Target-platform-qualified acquisition requires VS Marketplace.")
 
     publisher = metadata.get("publisher") or resolved_id.split(".", 1)[0]
     name = metadata.get("extension_name") or resolved_id.split(".", 1)[1]
@@ -168,8 +175,11 @@ def download_marketplace_vsix(
         f"https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{publisher}/"
         f"vsextensions/{name}/{target_version}/vspackage"
     )
+    if target_platform:
+        separator = "&" if "?" in download_url else "?"
+        download_url = f"{download_url}{separator}targetPlatform={quote(target_platform, safe='')}"
     download_urls = [download_url]
-    if metadata.get("registry") != "openvsx":
+    if metadata.get("registry") != "openvsx" and not target_platform:
         openvsx_metadata, _ = _fetch_openvsx_metadata(resolved_id)
         openvsx_url = str((openvsx_metadata or {}).get("download_url") or "")
         # Never satisfy an exact-version request with Open VSX's latest

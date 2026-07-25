@@ -9,7 +9,7 @@
     "benchmarks/adapters/protect_your_secrets.py": "b6be7211121b28b64eb9c4aece38f637b098dc1e3df3184c24b8075c07194b30",
     "benchmarks/runner.py": "9cd25959edbc03d220c27d64fbccd59b8e104eee7fdbbb2e75b86857b3d59e75",
     "classification_policy.py": "1ba7118d5cf6dc0803a93d9472e410283fe04c921ac99dd85b7b06593c5c6308",
-    "cli.py": "a5ce9f2614dd00833d1c87118e37f04dbc93dc901b4dfa0fda0937d28d0a7470",
+    "cli.py": "9ce36d833202b2261812c8d18654676f263b8daaeff15cfd5c815aad9a7b7e59",
     "core.py": "45357957474880baee4788e078c52b5dd36d51f84f7734e327f31a83d28f4802",
     "discovery.py": "69f9e1021cd09a109ad5487f7f58321c5fa562d417bf1130c216f1140c3b2a13",
     "intelligence/extension-advisories.json": "4d75db8be668fd3fef20b84cc1c63cdc3683d4caa1711d1cdb05af0e37c21b70",
@@ -25,16 +25,16 @@
     "providers/runtime.py": "a50e271da27974af83eed49ff8df75edf441fa7923b479be553d3614a1cffcb9",
     "providers/static_analysis.py": "ecb1beac9dfeba806b66893ab8c163936d65ffbc4767bad7c3dfb6cf259b9ba4",
     "public_outcomes.py": "0b69e8689a73698a6baf701c704995715294c8461c09e042c2077cfa51698831",
-    "registry.py": "94d6c35b38f336720ab1a5542b20d7004a481805c840cf45d2755b9f4360225a",
+    "registry.py": "dbb05e81090c2d67690ce7923d3c1d3bfe55ebbf3bee4064ea07e7d5011e068a",
     "report_bundle.py": "0e2ba9c890e8ea682b4109cf3aa5054e89424aa78ec88d9cb5434a31ffba279f",
     "rule_registry.py": "473f5dac265adead2ffae156d6a45bf3e085f813b83ba5799e846d03e1fce071",
     "rules.py": "8796e73bb31ec98b5e0b76a07ad45fc2a8133caeb22f6efe9335d3122c691257",
     "sandbox_runner.py": "ceec036df3a838cfb71db775cd79dcfe394bddd6dae9bfc0220a87a7d55090de",
-    "scanner.py": "cb02d1202acfe8b8969e802bd8c4019207e2de204fee362b2adf3f0baad21141",
+    "scanner.py": "1a14a330d70f5699787a9e1dcd0871c8b181e7b113d7be74e3114b9116897bb5",
     "service.py": "e18eed736a6ac186a420839647f00d5f040b07187578142b33b69249703ac964",
     "web_bridge.py": "cded6b1e2d0aa132f4c2b3153147c6db4a21ec410fa909cec228866fea826f89"
   },
   "schema_version": 2,
   "source_component": "guardrails-scanner-runtime",
-  "source_revision": "25b9123ed637f2dd546c28f4c7317a2a92ffba3b"
+  "source_revision": "33ed46d94ad72e9a4478205e72ee166d8599f374"
 }

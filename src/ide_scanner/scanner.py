@@ -221,6 +221,7 @@ def scan_targets(
     extension_ids: list[str] | None = None,
     marketplace_scan_ids: list[str] | None = None,
     marketplace_version: str | None = None,
+    marketplace_target_platform: str | None = None,
     include_fixtures: bool = False,
     all_local: bool = False,
     online: bool = False,
@@ -254,7 +255,12 @@ def scan_targets(
     ]
     extensions.extend(_registry_only_extension(extension_id) for extension_id in extension_ids or [])
     extensions.extend(
-        scan_marketplace_extension(identifier, version=marketplace_version, known_bad_hashes=known_bad_hashes)
+        scan_marketplace_extension(
+            identifier,
+            version=marketplace_version,
+            target_platform=marketplace_target_platform,
+            known_bad_hashes=known_bad_hashes,
+        )
         for identifier in marketplace_scan_ids or []
     )
     _apply_threat_feed(extensions, _load_threat_feed(threat_feed_file))
@@ -756,6 +762,7 @@ def _local_error_extension(path: Path, source: str, message: str) -> ExtensionRe
 def scan_marketplace_extension(
     identifier: str,
     version: str | None = None,
+    target_platform: str | None = None,
     known_bad_hashes: dict[str, dict[str, Any]] | None = None,
 ) -> ExtensionReport:
     """Download a VSIX from the VS Marketplace gallery and run the normal
@@ -769,7 +776,12 @@ def scan_marketplace_extension(
 
     registry_source: dict[str, str] = {}
     try:
-        vsix_path = download_marketplace_vsix(resolved_id, version=version, registry_out=registry_source)
+        vsix_path = download_marketplace_vsix(
+            resolved_id,
+            version=version,
+            target_platform=target_platform,
+            registry_out=registry_source,
+        )
     except MarketplaceDownloadError as exc:
         return _marketplace_error_extension(resolved_id, str(exc))
 

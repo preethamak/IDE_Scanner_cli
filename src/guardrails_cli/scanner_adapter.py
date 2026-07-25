@@ -99,6 +99,7 @@ def scan_marketplace(
     extension_id: str,
     *,
     version: str | None = None,
+    target_platform: str | None = None,
     registry_snapshot: str | Path | None = None,
     required_providers: set[str] | frozenset[str] | None = None,
 ) -> dict[str, Any]:
@@ -107,6 +108,7 @@ def scan_marketplace(
         lambda: scan_targets(
             marketplace_scan_ids=[extension_id],
             marketplace_version=version,
+            marketplace_target_platform=target_platform,
             online=True,
             registry_snapshot_file=registry_snapshot,
             include_posture=False,

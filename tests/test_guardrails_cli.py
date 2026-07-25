@@ -80,6 +80,8 @@ class GuardrailsCliTests(unittest.TestCase):
                 "sample.extension@1.0.0",
                 "--profile",
                 "deep",
+                "--target-platform",
+                "darwin-x64",
                 "--registry-snapshot",
                 "prior-report.json",
                 "--fail-on",
@@ -90,6 +92,7 @@ class GuardrailsCliTests(unittest.TestCase):
         scan.assert_called_once_with(
             "sample.extension",
             version="1.0.0",
+            target_platform="darwin-x64",
             registry_snapshot="prior-report.json",
             required_providers=frozenset({"semgrep", "yara", "dependency_intelligence"}),
         )

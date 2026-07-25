@@ -26,6 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("--path", "--folder", "--vsix", dest="path", action="append", default=[], help="Extension folder, extensions directory, or VSIX file to scan.")
     scan.add_argument("--extension-id", "--marketplace", dest="extension_id", action="append", default=[], help="Extension identifier to check against online registries.")
     scan.add_argument("--version", help="Pin one Marketplace extension scan to an exact published version.")
+    scan.add_argument("--target-platform", help="Pin a Marketplace artifact variant, for example darwin-x64.")
     scan.add_argument("--profile", choices=["quick", "standard", "deep", "smart", "benchmark"], default="smart", help="Report label recorded in the bundle. Analysis depth is identical across profiles; only 'deep' additionally enables online registry checks (same as --online).")
     scan.add_argument("--format", choices=["terminal", "json", "bundle.json", "report.zip", "sarif", "sqlite"], default=None, help="Output format. Defaults to a readable terminal brief interactively, JSON when piped, and report.zip when --output ends in .zip.")
     scan.add_argument("--online", action="store_true", help="Enable registry and dependency vulnerability checks.")
@@ -87,10 +88,13 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("scan --ui is not implemented yet. Use `scan --installed --output report.zip` and import the bundle in ide-scanner-web.")
         if args.version and len(args.extension_id) != 1:
             parser.error("scan --version requires exactly one --extension-id")
+        if args.target_platform and len(args.extension_id) != 1:
+            parser.error("scan --target-platform requires exactly one --extension-id")
         report = scan_targets(
             paths=[Path(item) for item in args.path],
             marketplace_scan_ids=args.extension_id,
             marketplace_version=args.version,
+            marketplace_target_platform=args.target_platform,
             include_fixtures=args.fixtures,
             all_local=args.installed,
             online=args.online or args.profile in {"deep"},
