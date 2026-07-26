@@ -480,6 +480,21 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
             candidate.relative_to(path).as_posix(),
         ),
     )
+    captured_preview_paths: set[str] = set()
+    primary_readme = next(
+        (
+            candidate
+            for candidate in sorted(files, key=lambda item: item.relative_to(path).as_posix().casefold())
+            if _is_primary_readme(candidate.relative_to(path).as_posix())
+        ),
+        None,
+    )
+    if primary_readme is not None:
+        rel = primary_readme.relative_to(path).as_posix()
+        preview = _bounded_source_preview(primary_readme, rel)
+        if preview is not None:
+            source_previews.append(preview)
+            captured_preview_paths.add(rel)
     for file in analysis_files:
         rel = file.relative_to(path).as_posix()
         suffix = file.suffix.lower()
@@ -493,18 +508,14 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
         if suffix not in TEXT_EXTS or (_is_ignored_static_asset(rel) and not is_entrypoint):
             if (
                 _is_documentation_preview(rel)
+                and rel not in captured_preview_paths
                 and len(source_previews) < MAX_SOURCE_PREVIEWS
                 and file.stat().st_size <= MAX_SOURCE_PREVIEW_BYTES
             ):
-                documentation = _read_text(file)
-                if documentation is not None:
-                    encoded = documentation.encode("utf-8")
-                    source_previews.append({
-                        "path": rel,
-                        "content": documentation,
-                        "content_sha256": hashlib.sha256(encoded).hexdigest(),
-                        "truncated": False,
-                    })
+                preview = _bounded_source_preview(file, rel)
+                if preview is not None:
+                    source_previews.append(preview)
+                    captured_preview_paths.add(rel)
             continue
 
         text = _read_text(file)
@@ -516,13 +527,18 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
             analysis_coverage["oversized_files"].append(rel)
             continue
         encoded_text = text.encode("utf-8")
-        if len(source_previews) < MAX_SOURCE_PREVIEWS and len(encoded_text) <= MAX_SOURCE_PREVIEW_BYTES:
+        if (
+            rel not in captured_preview_paths
+            and len(source_previews) < MAX_SOURCE_PREVIEWS
+            and len(encoded_text) <= MAX_SOURCE_PREVIEW_BYTES
+        ):
             source_previews.append({
                 "path": rel,
                 "content": text,
                 "content_sha256": hashlib.sha256(encoded_text).hexdigest(),
                 "truncated": False,
             })
+            captured_preview_paths.add(rel)
         scanned_files += 1
         # Run the bounded AST subprocess before expanding raw-text matches into
         # Python Finding objects. Large bundled entrypoints can otherwise push
@@ -3335,6 +3351,28 @@ def _is_ignored_static_asset(rel: str) -> bool:
 def _is_documentation_preview(rel: str) -> bool:
     path = Path(rel)
     return path.suffix.lower() in DOCUMENTATION_PREVIEW_EXTS and path.stem.lower() == "readme"
+
+
+def _is_primary_readme(rel: str) -> bool:
+    path = Path(rel)
+    return path.parent == Path(".") and _is_documentation_preview(rel)
+
+
+def _bounded_source_preview(path: Path, rel: str) -> dict[str, Any] | None:
+    if path.is_symlink() or path.stat().st_size > MAX_SOURCE_PREVIEW_BYTES:
+        return None
+    content = _read_text(path)
+    if content is None:
+        return None
+    encoded = content.encode("utf-8")
+    if len(encoded) > MAX_SOURCE_PREVIEW_BYTES:
+        return None
+    return {
+        "path": rel,
+        "content": content,
+        "content_sha256": hashlib.sha256(encoded).hexdigest(),
+        "truncated": False,
+    }
 
 
 def _static_provider_targets(
