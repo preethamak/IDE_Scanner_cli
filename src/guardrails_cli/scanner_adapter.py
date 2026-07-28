@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import base64
 import hashlib
 import importlib.util
 import json
@@ -9,78 +8,45 @@ import os
 import re
 import tempfile
 import zipfile
-from importlib.metadata import PackageNotFoundError, Distribution, distribution
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from typing import Any, Callable
 
 from guardrails_cli import __version__
 
 
-ENGINE_DISTRIBUTION = "guardlens-core"
-
-
-def _engine_identity() -> dict[str, Any]:
+def _engine_manifest() -> dict[str, Any]:
     try:
-        return json.loads(Path(__file__).with_name("engine_distribution.json").read_text(encoding="utf-8"))
+        return json.loads(Path(__file__).with_name("engine_source.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError) as exc:
-        raise RuntimeError(f"Scanner distribution identity is unreadable: {exc}") from exc
-
-
-def _engine_distribution() -> Distribution:
-    try:
-        return distribution(ENGINE_DISTRIBUTION)
-    except PackageNotFoundError as exc:
-        raise RuntimeError(
-            "Guardrails requires the guardlens-core scanner distribution. Reinstall Guardrails before scanning."
-        ) from exc
+        raise RuntimeError(f"Bundled scanner identity is unreadable: {exc}") from exc
 
 
 def _engine_root() -> Path:
     spec = importlib.util.find_spec("ide_scanner")
     if spec is None or spec.origin is None:
-        raise RuntimeError("Installed guardlens-core scanner package is unavailable.")
+        raise RuntimeError("Bundled scanner package is unavailable.")
     return Path(spec.origin).resolve().parent
 
 
 def verify_engine_integrity(engine_root: Path | None = None) -> None:
-    identity = _engine_identity()
-    expected_version = identity.get("version")
-    if not isinstance(expected_version, str) or not expected_version:
-        raise RuntimeError("Scanner distribution identity contains no version.")
-    package = _engine_distribution()
-    if package.version != expected_version:
-        raise RuntimeError(
-            f"Guardrails requires guardlens-core {expected_version}, found {package.version}. Reinstall Guardrails."
-        )
+    source = _engine_manifest()
+    expected = source.get("files")
+    if not isinstance(expected, dict) or not expected:
+        raise RuntimeError("Bundled scanner identity contains no file hashes.")
     root = engine_root or _engine_root()
-    expected: dict[str, str] = {}
-    for record in package.files or []:
-        relative = Path(str(record))
-        if not relative.parts or relative.parts[0] != "ide_scanner" or record.hash is None:
-            continue
-        engine_relative = relative.relative_to("ide_scanner").as_posix()
-        if relative.suffix == ".pyc" or "__pycache__" in relative.parts:
-            continue
-        expected[engine_relative] = record.hash.value
-    required = {"__init__.py", "scanner.py"}
-    if not required.issubset(expected):
-        raise RuntimeError("guardlens-core distribution does not contain a complete, hash-recorded scanner package.")
-    actual_files = {
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file() and path.suffix != ".pyc" and "__pycache__" not in path.parts
-    }
-    if actual_files != set(expected):
-        raise RuntimeError("guardlens-core scanner files do not match its installed distribution record.")
     for relative, expected_hash in sorted(expected.items()):
-        target = root / relative
+        path = Path(str(relative))
+        if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+            raise RuntimeError(f"Bundled scanner identity contains an unsafe path: {relative!r}")
+        target = root / path
         try:
-            actual_hash = base64.urlsafe_b64encode(hashlib.sha256(target.read_bytes()).digest()).decode().rstrip("=")
+            actual_hash = hashlib.sha256(target.read_bytes()).hexdigest()
         except OSError as exc:
-            raise RuntimeError(f"Installed scanner file is unavailable: {relative}") from exc
+            raise RuntimeError(f"Bundled scanner file is unavailable: {relative}") from exc
         if actual_hash != expected_hash:
             raise RuntimeError(
-                f"Installed scanner integrity check failed for {relative}. "
+                f"Bundled scanner integrity check failed for {relative}. "
                 "Reinstall Guardrails before scanning."
             )
 
@@ -193,8 +159,33 @@ def get_rules() -> dict[str, Any]:
 
 
 def engine_identity() -> dict[str, str]:
-    package = _engine_distribution()
-    return {"version": str(package.version), "build": f"pypi:{package.version}"}
+    package = None
+    for distribution_name in ("guardlens", "ide-scanner"):
+        try:
+            package = distribution(distribution_name)
+            break
+        except PackageNotFoundError:
+            continue
+    if package is None:
+        return {"version": "unknown", "build": "unknown"}
+    build = f"pypi:{package.version}"
+    try:
+        source = _engine_manifest()
+        revision = str(source.get("source_revision") or "")
+        if re.fullmatch(r"[0-9a-f]{40}", revision):
+            build = revision
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    direct_url = package.read_text("direct_url.json")
+    if direct_url and build.startswith("pypi:"):
+        try:
+            parsed = json.loads(direct_url)
+            commit_id = (parsed.get("vcs_info") or {}).get("commit_id")
+            if commit_id:
+                build = str(commit_id)
+        except json.JSONDecodeError:
+            pass
+    return {"version": str(package.version or "unknown"), "build": build}
 
 
 def write_bundle(report: dict[str, Any], output: str | Path, *, source: str = "cli", profile: str = "standard") -> dict[str, Any]:

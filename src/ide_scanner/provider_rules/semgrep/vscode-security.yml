@@ -1,0 +1,86 @@
+rules:
+  - id: credential-dataflow-to-network
+    message: Credential-related input flows to an outbound network sink.
+    languages: [javascript, typescript]
+    severity: ERROR
+    mode: taint
+    metadata:
+      ide_scanner_evidence_class: correlated
+      ide_scanner_category: cross-extension-exposure
+      ide_scanner_severity: CRITICAL
+    pattern-sources:
+      - pattern-either:
+          - pattern: $CTX.secrets.get(...)
+          - patterns:
+              - pattern: process.env.$KEY
+              - metavariable-regex:
+                  metavariable: $KEY
+                  regex: '(?i).*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH).*'
+    pattern-sinks:
+      - pattern-either:
+          - pattern: 'fetch($URL, {..., body: $DATA, ...})'
+          - pattern: fetch($URL, $DATA)
+          - pattern: axios.$METHOD(..., $DATA, ...)
+          - pattern: $HTTP.request(...).write($DATA)
+          - pattern: $REQ.write($DATA)
+
+  - id: untrusted-workspace-input-to-process
+    message: Workspace-controlled input flows to process execution.
+    languages: [javascript, typescript]
+    severity: ERROR
+    mode: taint
+    metadata:
+      ide_scanner_evidence_class: capability
+      ide_scanner_category: execution
+      ide_scanner_severity: MEDIUM
+    pattern-sources:
+      - pattern-either:
+          - pattern: $VSCODE.window.activeTextEditor.document.getText(...)
+          - pattern: $VSCODE.workspace.getConfiguration(...).get(...)
+          - pattern: $VSCODE.workspace.workspaceFolders
+    pattern-sinks:
+      - pattern-either:
+          - pattern: $CP.exec($DATA, ...)
+          - pattern: $CP.execSync($DATA, ...)
+          - pattern: '$CP.spawn($DATA, ..., { ..., shell: true, ... })'
+          - pattern: '$CP.spawnSync($DATA, ..., { ..., shell: true, ... })'
+
+  - id: webview-message-to-process
+    message: Webview message data flows to process execution.
+    languages: [javascript, typescript]
+    severity: ERROR
+    mode: taint
+    metadata:
+      ide_scanner_evidence_class: correlated
+      ide_scanner_category: webview
+      ide_scanner_severity: HIGH
+    pattern-sources:
+      - patterns:
+          - pattern: $WEBVIEW.onDidReceiveMessage(($MSG) => $BODY, ...)
+          - focus-metavariable: $MSG
+    pattern-sinks:
+      - pattern-either:
+          - pattern: $CP.exec($DATA, ...)
+          - pattern: $CP.spawn($DATA, ...)
+          - pattern: eval($DATA)
+
+  - id: decoded-payload-execution
+    message: Decoded or deobfuscated data flows to dynamic execution.
+    languages: [javascript, typescript]
+    severity: ERROR
+    mode: taint
+    metadata:
+      ide_scanner_evidence_class: correlated
+      ide_scanner_category: code
+      ide_scanner_severity: HIGH
+    pattern-sources:
+      - pattern-either:
+          - pattern: Buffer.from(..., "base64")
+          - pattern: atob(...)
+          - pattern: String.fromCharCode(...)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: eval($DATA)
+          - pattern: new Function($DATA)
+          - pattern: $VM.runInNewContext($DATA, ...)
+          - pattern: $VM.runInThisContext($DATA, ...)

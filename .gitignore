@@ -11,7 +11,6 @@ build/
 *.zip
 *.json
 !src/guardrails_cli/engine_source.json
-!src/guardrails_cli/engine_distribution.json
 !src/ide_scanner/intelligence/
 !src/ide_scanner/intelligence/extension-advisories.json
 *.html

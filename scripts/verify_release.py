@@ -7,7 +7,9 @@ from pathlib import Path
 
 
 REQUIRED_FILES = {
-    "guardrails_cli/engine_distribution.json",
+    "guardrails_cli/engine_source.json",
+    "ide_scanner/provider_rules/semgrep/vscode-security.yml",
+    "ide_scanner/provider_rules/yara/ide-scanner.yar",
 }
 
 
@@ -32,12 +34,10 @@ def verify_wheel(path: Path, *, expected_version: str) -> None:
                     f"package version is {metadata.get('Version')!r}, expected {expected_version!r}"
                 )
             requirements = "\n".join(metadata.get_all("Requires-Dist") or [])
-            if "guardlens-core" not in requirements.lower():
-                failures.append("wheel does not depend on guardlens-core")
+            if "guardlens-core" in requirements.lower():
+                failures.append("wheel depends on the retired guardlens-core project")
         if not REQUIRED_FILES.issubset(names):
             failures.extend(f"wheel is missing {name}" for name in sorted(REQUIRED_FILES - names))
-        if any(name.startswith("ide_scanner/") for name in names):
-            failures.append("wheel must not bundle scanner engine files")
         if len(entry_point_names) != 1:
             failures.append("wheel must contain exactly one entry_points.txt file")
         elif "guardrails = guardrails_cli.main:main" not in archive.read(entry_point_names[0]).decode("utf-8"):

@@ -14,7 +14,6 @@ authors = [{ name = "Preetham AK" }]
 maintainers = [{ name = "Preetham AK" }]
 dependencies = [
   "textual>=8.2.8,<9",
-  "guardlens-core>=0.2.0,<0.3.0",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -38,10 +37,17 @@ Website = "https://ide-scanner.vercel.app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["guardrails_cli*"]
+include = ["guardrails_cli*", "ide_scanner*"]
 
 [tool.setuptools.package-data]
-guardrails_cli = ["assets/*.png", "engine_distribution.json"]
+guardrails_cli = ["assets/*.png", "engine_source.json"]
+ide_scanner = [
+  "intelligence/*.json",
+  "js_ast/*.js",
+  "js_ast/*LICENSE*",
+  "provider_rules/semgrep/*.yml",
+  "provider_rules/yara/*.yar",
+]
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src"]

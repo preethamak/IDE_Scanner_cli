@@ -1,17 +1,17 @@
 # Guardrails CLI Architecture
 
-The CLI is a private local-scan presentation client. It discovers installed extensions, creates private snapshots, invokes `guardlens-core`, and exports canonical reports without changing scanner policy.
+The CLI is a private local-scan presentation client. It discovers installed extensions, creates private snapshots, invokes its bundled scanner runtime, and exports canonical reports without changing scanner policy.
 
 ## Boundaries
 
-- `guardrails_cli/scanner_adapter.py` verifies the installed `guardlens-core` wheel before importing scanner modules, then exposes narrow scan and report-adaptation calls.
+- `guardrails_cli/scanner_adapter.py` verifies the bundled scanner runtime before importing scanner modules, then exposes narrow scan and report-adaptation calls.
 - `snapshot.py` owns temporary private scan copies and cleanup.
 - `scan_service.py` owns user-selected profile semantics.
 - `presentation.py`, `tui.py`, and `exporters/` own display and export only.
 
 ## Engine integrity
 
-`engine_distribution.json` pins the required core version. The adapter checks every installed scanner file against the package `RECORD` hash before scanner code loads. The release verifier rejects a CLI wheel containing `ide_scanner` files; the engine is never copied into this repository.
+`engine_source.json` records the canonical scanner revision and a SHA-256 hash for every bundled runtime file. The adapter checks those hashes before scanner code loads. CI synchronizes the bundled runtime from `ide-scanner` and rejects any unrecorded drift. Users install one `guardlens` wheel with no scanner runtime dependency.
 
 ## Contract
 
