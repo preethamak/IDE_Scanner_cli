@@ -55,7 +55,7 @@ revision and file hashes are recorded in the package, and CI rejects unrecorded
 engine drift:
 
 ```bash
-python scripts/sync_vendored_engine.py --check
+python scripts/verify_engine_distribution.py --check
 ```
 
 ## Privacy

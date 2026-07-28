@@ -11,7 +11,14 @@ import zipfile
 from importlib.resources import files
 from pathlib import Path
 
-from guardrails_cli.scanner_adapter import display_report, engine_identity, scan_paths, verify_engine_integrity, write_bundle
+from guardrails_cli.scanner_adapter import (
+    _engine_root,
+    display_report,
+    engine_identity,
+    scan_paths,
+    verify_engine_integrity,
+    write_bundle,
+)
 from guardrails_cli.scan_service import run_with_profile
 from ide_scanner.providers.runtime import SEMGREP_RULES, YARA_RULES, provider_diagnostics
 from ide_scanner.classification_policy import POLICY_VERSION
@@ -44,19 +51,16 @@ class EngineParityTests(unittest.TestCase):
         self.assertEqual(presented["metadata"]["intelligence_snapshot"], report["intelligence"])
         self.assertEqual(presented["registry_checks"], report["registry_checks"])
 
-    def test_vendored_engine_matches_its_source_manifest(self) -> None:
-        from scripts.sync_vendored_engine import check
+    def test_installed_engine_matches_its_distribution_identity(self) -> None:
+        from scripts.verify_engine_distribution import verify
 
-        check()
-        source = json.loads(files("guardrails_cli").joinpath("engine_source.json").read_text(encoding="utf-8"))
-        self.assertEqual(engine_identity()["build"], source["source_revision"])
-        self.assertEqual(source["source_component"], "guardrails-scanner-runtime")
-        self.assertNotIn("source_repository", source)
+        verify()
+        identity = json.loads(files("guardrails_cli").joinpath("engine_distribution.json").read_text(encoding="utf-8"))
+        self.assertEqual(engine_identity()["version"], identity["version"])
+        self.assertEqual(engine_identity()["build"], f"pypi:{identity['version']}")
+        self.assertEqual(identity["distribution"], "guardlens-core")
 
     def test_static_provider_rules_are_part_of_the_verified_runtime(self) -> None:
-        source = json.loads(files("guardrails_cli").joinpath("engine_source.json").read_text(encoding="utf-8"))
-        self.assertIn("provider_rules/semgrep/vscode-security.yml", source["files"])
-        self.assertIn("provider_rules/yara/ide-scanner.yar", source["files"])
         self.assertTrue(SEMGREP_RULES.is_dir())
         self.assertTrue(YARA_RULES.is_file())
         diagnostics = provider_diagnostics()
@@ -64,7 +68,7 @@ class EngineParityTests(unittest.TestCase):
         self.assertTrue(diagnostics["yara"]["ruleset_hash"])
 
     def test_runtime_integrity_check_rejects_overwritten_engine_files(self) -> None:
-        source_root = Path(__file__).parents[1] / "src" / "ide_scanner"
+        source_root = _engine_root()
         with tempfile.TemporaryDirectory() as directory:
             copied_root = Path(directory) / "ide_scanner"
             shutil.copytree(source_root, copied_root)
@@ -79,7 +83,7 @@ class EngineParityTests(unittest.TestCase):
             copied_source = Path(directory) / "src"
             copied_source.mkdir()
             shutil.copytree(source_root / "guardrails_cli", copied_source / "guardrails_cli")
-            shutil.copytree(source_root / "ide_scanner", copied_source / "ide_scanner")
+            shutil.copytree(_engine_root(), copied_source / "ide_scanner")
             with (copied_source / "ide_scanner" / "__init__.py").open("a", encoding="utf-8") as handle:
                 handle.write("\nraise RuntimeError('scanner module executed before verification')\n")
             environment = {**os.environ, "PYTHONPATH": str(copied_source)}
