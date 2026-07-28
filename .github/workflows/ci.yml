@@ -16,12 +16,20 @@ jobs:
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the manifest-pinned canonical scanner revision
+        env:
+          SCANNER_REPOSITORY: preethamak/IDE_Scanner
+        run: |
+          revision="$(python -c 'import json; print(json.load(open("src/guardrails_cli/engine_source.json"))["source_revision"])')"
+          git init scanner-source
+          git -C scanner-source remote add origin "https://github.com/${SCANNER_REPOSITORY}.git"
+          git -C scanner-source fetch --depth=1 origin "$revision"
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e .
-      - run: python scripts/sync_vendored_engine.py --check
+      - run: python scripts/sync_vendored_engine.py --check --source-checkout scanner-source
       - run: python -m unittest discover -s tests -v
       - run: guardrails --help

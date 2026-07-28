@@ -79,7 +79,7 @@ def sync(checkout: Path, revision: str) -> None:
     MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def check() -> None:
+def check(source_checkout: Path | None = None) -> None:
     try:
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -101,16 +101,43 @@ def check() -> None:
     if failures:
         raise SystemExit("Vendored scanner drift detected:\n" + "\n".join(failures))
 
+    if source_checkout is None:
+        return
+
+    revision = manifest.get("source_revision")
+    if not isinstance(revision, str) or len(revision) != 40:
+        raise SystemExit("Engine source manifest is missing a full source revision.")
+    resolved = git(source_checkout, "rev-parse", "--verify", f"{revision}^{{commit}}").decode().strip()
+    if resolved != revision.lower():
+        raise SystemExit(f"Canonical scanner checkout resolved {resolved}, not {revision}.")
+    source_files = {
+        Path(path).relative_to("src/ide_scanner").as_posix()
+        for path in git(source_checkout, "ls-tree", "-r", "--name-only", revision, "--", "src/ide_scanner").decode().splitlines()
+        if path and not any(part in IGNORED_PARTS for part in Path(path).parts) and Path(path).suffix != ".pyc"
+    }
+    if source_files != set(expected):
+        missing = sorted(set(expected) - source_files)
+        unexpected = sorted(source_files - set(expected))
+        details = [*(f"missing canonical file: {path}" for path in missing), *(f"unexpected canonical file: {path}" for path in unexpected)]
+        raise SystemExit("Canonical scanner file set differs from engine manifest:\n" + "\n".join(details))
+    source_failures = [
+        relative
+        for relative, expected_hash in sorted(expected.items())
+        if hashlib.sha256(git(source_checkout, "show", f"{revision}:src/ide_scanner/{relative}")).hexdigest() != expected_hash
+    ]
+    if source_failures:
+        raise SystemExit("Vendored scanner differs from the recorded canonical revision:\n" + "\n".join(source_failures))
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Synchronize and verify Guardrails' bundled scanner engine.")
-    parser.add_argument("--source-checkout", type=Path, help="Git checkout containing the committed scanner source.")
+    parser.add_argument("--source-checkout", type=Path, help="Git checkout containing the committed canonical scanner source.")
     parser.add_argument("--revision", help="Full source repository commit SHA.")
     parser.add_argument("--check", action="store_true", help="Verify the bundled files against the recorded hashes.")
     args = parser.parse_args()
 
     if args.check:
-        check()
+        check(args.source_checkout.resolve() if args.source_checkout else None)
         return 0
     if args.source_checkout is None or not args.revision:
         parser.error("--source-checkout and --revision are required when synchronizing.")
