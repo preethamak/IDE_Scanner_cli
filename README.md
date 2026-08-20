@@ -32,6 +32,7 @@ Common commands:
 guardrails scan --ide cursor --all --yes
 guardrails scan --extension publisher.extension
 guardrails scan --file extension.vsix
+guardrails inventory --ide cursor --output team-inventory.json
 guardrails report verify report.zip
 guardrails help
 ```

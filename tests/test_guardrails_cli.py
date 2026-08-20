@@ -51,6 +51,33 @@ class GuardrailsCliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("--all, --extension, or --select", error)
 
+    def test_inventory_export_matches_team_workspace_contract_without_paths(self) -> None:
+        rows = [
+            {"client": "Cursor", "path": "/private/extensions/one", "extension_id": "sample.one", "display_name": "One", "publisher": "sample", "version": "1.0.0"},
+            {"client": "VS Code", "path": "/private/extensions/two", "extension_id": "sample.two", "display_name": "Two", "publisher": "sample", "version": "2.0.0"},
+        ]
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("guardrails_cli.main.installed_extensions", return_value=rows),
+            patch("guardrails_cli.main.platform.system", return_value="Linux"),
+        ):
+            output = Path(directory) / "inventory.json"
+            code, message, error = self.run_cli(["inventory", "--ide", "cursor", "--device-id", "team-laptop-1", "--device-name", "Team laptop", "--output", str(output)])
+            payload = __import__("json").loads(output.read_text(encoding="utf-8"))
+        self.assertEqual((code, error), (0, ""))
+        self.assertIn("Exported 1 installed extensions", message)
+        self.assertEqual(payload["device"], {"id": "team-laptop-1", "name": "Team laptop", "platform": "linux"})
+        self.assertEqual(payload["source"], "cli")
+        self.assertEqual(payload["extensions"], [{"extension_id": "sample.one", "version": "1.0.0", "registry": "unknown"}])
+        self.assertNotIn("/private", str(payload))
+
+    def test_inventory_export_rejects_unsafe_device_identifiers(self) -> None:
+        rows = [{"client": "Cursor", "extension_id": "sample.one", "version": "1.0.0"}]
+        with patch("guardrails_cli.main.installed_extensions", return_value=rows):
+            code, _message, error = self.run_cli(["inventory", "--ide", "cursor", "--device-id", "../../host", "--output", "ignored.json"])
+        self.assertEqual(code, 2)
+        self.assertIn("Device id", error)
+
     def test_tui_requires_an_interactive_terminal(self) -> None:
         code, _output, error = self.run_cli(["tui"])
         self.assertEqual(code, 2)

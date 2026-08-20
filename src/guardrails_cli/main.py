@@ -4,8 +4,10 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_metrics(args)
         if args.command == "doctor":
             return cmd_doctor(args)
+        if args.command == "inventory":
+            return cmd_inventory(args)
         if args.command == "help":
             return cmd_help(args)
         if args.command == "tui":
@@ -135,11 +139,61 @@ def build_parser() -> argparse.ArgumentParser:
     metrics = subparsers.add_parser("metrics", help="Explain decisions, scores, evidence, and coverage.")
     metrics.add_argument("topic", nargs="?", choices=("decisions", "scores", "evidence", "coverage", "all"), default="all")
     subparsers.add_parser("doctor", help="Check local scan dependencies and detected IDE clients.")
+    inventory = subparsers.add_parser("inventory", help="Export installed extension versions for a team workspace.")
+    inventory.add_argument("--ide", choices=IDE_CHOICES, required=True, help="Export one IDE client as a distinct inventory device.")
+    inventory.add_argument("--output", "--out", dest="output", required=True, help="Write workspace-compatible JSON to this path.")
+    inventory.add_argument("--device-id", help="Stable non-secret device identifier. Defaults to a local machine and IDE fingerprint.")
+    inventory.add_argument("--device-name", help="Human-readable device label. Defaults to the IDE and operating system.")
     help_command = subparsers.add_parser("help", help="Read the Guardrails command and workflow manual.")
     help_command.add_argument("topic", nargs="?", choices=TOPICS)
     subparsers.add_parser("tui", help="Open the interactive Local Scan terminal application.")
     subparsers.add_parser("version", help="Print the Guardrails version.")
     return parser
+
+
+def cmd_inventory(args: argparse.Namespace) -> int:
+    rows = [row for row in installed_extensions() if _ide_key(str(row.get("client") or "")) == args.ide]
+    if not rows:
+        raise ValueError(f"No installed extensions were detected for {args.ide}.")
+    device_id = args.device_id or _inventory_device_id(args.ide)
+    if not _valid_device_id(device_id):
+        raise ValueError("Device id may contain letters, numbers, dots, underscores, colons, and hyphens (maximum 160 characters).")
+    system = platform.system().lower()
+    platform_name = {"darwin": "macos", "windows": "windows", "linux": "linux"}.get(system, "other")
+    extensions: dict[str, dict[str, str]] = {}
+    for row in rows:
+        extension_id = str(row.get("extension_id") or "").strip()
+        version = str(row.get("version") or "").strip()
+        if not extension_id or not version:
+            continue
+        extensions[extension_id.lower()] = {"extension_id": extension_id, "version": version, "registry": "unknown"}
+    payload = {
+        "device": {
+            "id": device_id,
+            "name": args.device_name or f"{args.ide.title()} on {platform.system() or 'Unknown OS'}",
+            "platform": platform_name,
+        },
+        "reported_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "source": "cli",
+        "extensions": sorted(extensions.values(), key=lambda item: item["extension_id"].lower()),
+    }
+    destination = Path(args.output)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, destination)
+    print(f"Exported {len(payload['extensions'])} installed extensions to {destination}.")
+    print("Import this file from Team Workspace → Inventory. Local paths and source files were not included.")
+    return 0
+
+
+def _inventory_device_id(ide: str) -> str:
+    identity = f"{platform.node()}:{platform.system()}:{ide}".encode("utf-8")
+    return f"guardrails-{ide}-{hashlib.sha256(identity).hexdigest()[:20]}"
+
+
+def _valid_device_id(value: str) -> bool:
+    return 0 < len(value) <= 160 and all(character.isalnum() or character in "._:-" for character in value)
 
 
 def interactive_application() -> int:
