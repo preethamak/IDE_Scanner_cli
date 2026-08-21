@@ -49,11 +49,14 @@ def has_integrity_gate(text: str) -> bool:
     )
 
 
-def module_summary(rel: str, text: str) -> dict[str, Any]:
+def module_summary(rel: str, text: str, *, analyze_imports: bool = True) -> dict[str, Any]:
+    # Bundler output contains module source and path strings that resemble live
+    # relative imports but are no longer runtime edges. Preserve same-file
+    # capability signals while avoiding a misleading graph for those blobs.
     imports = {
         _resolve_import(rel, next(value for value in match.groups() if value))
         for match in _IMPORT_RE.finditer(text)
-    }
+    } if analyze_imports else set()
     return {
         "path": rel,
         "imports": sorted(imports),

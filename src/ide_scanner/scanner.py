@@ -25,6 +25,7 @@ from .ast_analyzer import (
     analyze_js_source_status,
     node_available,
 )
+from .bundle_analysis import analyze_generated_bundle
 from .calibration import calibrated_score, max_calibrated_score
 from .classification_policy import (
     POLICY_VERSION,
@@ -134,6 +135,7 @@ CORRELATED_RULES = {
     "obfuscation-execution-network",
     "persistence-chain",
     "remote-vsix-install-chain",
+    "obfuscated-credential-harvesting-exfiltration",
     "supply-chain-dropper-chain",
 }
 BLOCKING_CORRELATED_RULES = CORRELATED_RULES - {"download-and-execute"}
@@ -181,7 +183,13 @@ CAPABILITY_RULES = {
 }
 DEPENDENCY_RULES = {"mutable-dependency-source", "unpinned-dependency", "vulnerable-npm-dependency"}
 PROVENANCE_RULES = {"marketplace-removed-package", "packed-artifact", "source-vsix-diff-unexplained", "binary-without-origin"}
-POSTURE_RULES = {"dangerous-github-workflow", "repo-binary-artifacts", "workflow-token-permissions-broad", "entrypoint-ast-unparsed"}
+POSTURE_RULES = {
+    "dangerous-github-workflow",
+    "repo-binary-artifacts",
+    "workflow-token-permissions-broad",
+    "entrypoint-ast-unparsed",
+    "executable-heavy-obfuscation",
+}
 REPUTATION_RULES = {
     "marketplace-extension-not-found",
     "marketplace-low-install-count",
@@ -612,7 +620,7 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
         if suffix in EXEC_TEXT_EXTS:
             analysis_coverage["analyzed_executable_files"].append(rel)
             if suffix in JS_AST_EXTS:
-                module_summaries.append(module_summary(rel, text))
+                module_summaries.append(module_summary(rel, text, analyze_imports=not generated_blob))
             _add_code_findings(extension_id, version, rel, text, findings, capabilities)
             _add_workspace_cli_path_findings(extension_id, version, manifest, [(rel, text)], findings)
         if suffix in EXEC_TEXT_EXTS or suffix in {".html", ".htm"}:
@@ -1873,6 +1881,46 @@ def _add_code_findings(
     # high-specificity local flow checks, but do not promote general token
     # proximity across the bundle into correlated evidence.
     if _is_generated_code_blob(rel, text):
+        bundle_profile = analyze_generated_bundle(text)
+        if bundle_profile["strong_obfuscation"]:
+            findings.append(_finding(
+                extension_id,
+                version,
+                "executable-heavy-obfuscation",
+                "code",
+                "MEDIUM",
+                0.9,
+                "Executable bundle uses systematic control-flow and identifier obfuscation that materially limits static interpretation.",
+                [rel],
+                "Require manual review or a trusted reproducible source-to-artifact comparison before approval.",
+                {
+                    "evidence_class": "posture",
+                    "analysis": "bounded-static-bundle-profile",
+                    "obfuscation_indicators": bundle_profile["obfuscation_indicators"],
+                    "metrics": bundle_profile["metrics"],
+                },
+            ))
+        if bundle_profile["harvesting_exfiltration"]:
+            findings.append(_finding(
+                extension_id,
+                version,
+                "obfuscated-credential-harvesting-exfiltration",
+                "credential-access",
+                "HIGH",
+                0.94,
+                "An obfuscated executable bundle contains a multi-family credential collector and outbound payload path.",
+                [rel],
+                "Prevent execution and investigate the credential targets, collection APIs, and outbound destination.",
+                {
+                    "evidence_class": "correlated",
+                    "correlation": "obfuscation-resistant-semantic-feature-chain",
+                    "credential_families": bundle_profile["credential_families"],
+                    "collection_signals": bundle_profile["collection_signals"],
+                    "exfiltration_signals": bundle_profile["exfiltration_signals"],
+                    "obfuscation_indicators": bundle_profile["obfuscation_indicators"],
+                    "metrics": bundle_profile["metrics"],
+                },
+            ))
         if secret_refs and has_file_read and has_network and _has_direct_credential_network_flow(text, secret_regex):
             findings.append(_finding(
                 extension_id,

@@ -51,6 +51,7 @@ _CONTEXTUAL_PROVENANCE_RULES = {
 
 _REVIEW_POSTURE_RULES = {
     "entrypoint-ast-unparsed",
+    "executable-heavy-obfuscation",
 }
 
 

@@ -24,6 +24,10 @@ SEMGREP_RULES = _PACKAGE_ROOT / "provider_rules" / "semgrep"
 YARA_RULES = _PACKAGE_ROOT / "provider_rules" / "yara" / "ide-scanner.yar"
 SEMGREP_MAX_TARGET_BYTES = 256 * 1024
 SEMGREP_RULE_TIMEOUT_SECONDS = 15
+# Semgrep's native runtime reserves a large virtual address space. Applying a
+# process-wide RLIMIT_AS makes semgrep-core abort even when its resident memory
+# is modest, so use Semgrep's per-file memory guard for this provider instead.
+SEMGREP_MEMORY_LIMIT_MB = 1536
 PROVIDER_MEMORY_LIMIT_MB = 1536
 PROVIDER_FILE_SIZE_LIMIT_MB = 64
 

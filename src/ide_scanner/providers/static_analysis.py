@@ -15,6 +15,7 @@ from ..rules import score_finding
 from .runtime import (
     SEMGREP_RULES,
     SEMGREP_MAX_TARGET_BYTES,
+    SEMGREP_MEMORY_LIMIT_MB,
     SEMGREP_RULE_TIMEOUT_SECONDS,
     PROVIDER_FILE_SIZE_LIMIT_MB,
     PROVIDER_MEMORY_LIMIT_MB,
@@ -88,7 +89,8 @@ def _run_semgrep(
         return [], status
     status.update({
         "isolation": "subprocess",
-        "memory_limit_mb": PROVIDER_MEMORY_LIMIT_MB,
+        "memory_limit_mb": SEMGREP_MEMORY_LIMIT_MB,
+        "memory_limit_enforcement": "semgrep_per_file",
         "file_size_limit_mb": PROVIDER_FILE_SIZE_LIMIT_MB,
     })
     selected = targets if targets is not None else [root]
@@ -105,6 +107,7 @@ def _run_semgrep(
         "--disable-version-check",
         "--no-git-ignore",
         "--jobs", "1",
+        "--max-memory", str(SEMGREP_MEMORY_LIMIT_MB),
         "--timeout", str(SEMGREP_RULE_TIMEOUT_SECONDS),
         "--max-target-bytes", str(SEMGREP_MAX_TARGET_BYTES),
         *(str(path) for path in selected),
@@ -115,7 +118,9 @@ def _run_semgrep(
                 command,
                 timeout=semgrep_timeout_seconds(),
                 env=environment,
-                memory_limit_mb=PROVIDER_MEMORY_LIMIT_MB,
+                # RLIMIT_AS is incompatible with semgrep-core's virtual-memory
+                # reservation. Semgrep enforces --max-memory per analyzed file.
+                memory_limit_mb=None,
                 file_size_limit_mb=PROVIDER_FILE_SIZE_LIMIT_MB,
             )
         payload = json.loads(result.stdout or "{}")

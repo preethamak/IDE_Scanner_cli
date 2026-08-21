@@ -4,7 +4,7 @@ from .classification_policy import POLICY_VERSION
 from .models import RuleMetadata
 from .rules import CODE_RULES
 
-RULESET_VERSION = "2026.07.24-policy-v3-calibration.6"
+RULESET_VERSION = "2026.08.21-obfuscated-bundle.1"
 
 
 _RULE_OVERRIDES: dict[str, dict[str, object]] = {
@@ -82,6 +82,26 @@ _RULE_OVERRIDES: dict[str, dict[str, object]] = {
         "recommendation": "Block the extension and investigate its credential collection paths and network destinations.",
         "false_positive_notes": "Legitimate migration or backup tools can exhibit similar behavior and require explicit user intent and documented destinations.",
         "benchmark_tags": ["credential", "filesystem", "network", "interprocedural"],
+    },
+    "obfuscated-credential-harvesting-exfiltration": {
+        "title": "Obfuscated credential harvesting and exfiltration",
+        "category": "credential-access",
+        "evidence_class": "correlated",
+        "default_severity": "HIGH",
+        "description": "Detects a generated executable bundle that combines systematic obfuscation, multi-family credential targets, filesystem collection, payload packaging, and outbound transfer semantics.",
+        "recommendation": "Prevent execution and investigate the credential targets, collection APIs, and outbound destination.",
+        "false_positive_notes": "Legitimate migration or backup products may collect multiple credential families, but obfuscated IDE entrypoints should not do so without independently verifiable source and explicit user intent.",
+        "benchmark_tags": ["credential", "filesystem", "network", "obfuscation", "bundle"],
+    },
+    "executable-heavy-obfuscation": {
+        "title": "Heavily obfuscated executable bundle",
+        "category": "code",
+        "evidence_class": "posture",
+        "default_severity": "MEDIUM",
+        "description": "Detects systematic identifier, numeric, computed-member, and control-flow obfuscation in generated executable code.",
+        "recommendation": "Require manual review or a trusted reproducible source-to-artifact comparison before approval.",
+        "false_positive_notes": "Obfuscation is not malware evidence by itself; this rule requires review and only becomes a preventive block when a separate high-specificity abuse chain matches.",
+        "benchmark_tags": ["code", "obfuscation", "bundle", "posture"],
     },
     "credential-identifier-flow-to-network": {
         "title": "Credential value reaches network body",
