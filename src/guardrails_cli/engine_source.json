@@ -11,7 +11,7 @@
     "benchmarks/adapters/protect_your_secrets.py": "b6be7211121b28b64eb9c4aece38f637b098dc1e3df3184c24b8075c07194b30",
     "benchmarks/production.py": "ffd81a4390d4db2714d98ed4a0d99670065d5f427bd603b5981a042f63905474",
     "benchmarks/runner.py": "9cd25959edbc03d220c27d64fbccd59b8e104eee7fdbbb2e75b86857b3d59e75",
-    "bundle_analysis.py": "2a38808a786767fbcf332988c8d6c46971608f9bcbaaeba6881155b02a41158d",
+    "bundle_analysis.py": "6cd5c8c2020150bf8205ae3dcff67bb8618e6a8db8e51115c591ed5ae5940731",
     "calibration.py": "b1f5d0d354c7a1a6529f7dd19beead3c3298858cc4ad6db141f3159b67cc36b1",
     "calibration/scoring-v1.json": "2a2abab9810c00afae3e2a7db40f7584d911dc0ada77c7ab96e50d1abf7025fb",
     "capability_contracts.py": "dc47af47e3a792034ad400d1a59057895537333c5eb0ed27de7a5a9f9e1a78ec",
@@ -48,5 +48,5 @@
   },
   "schema_version": 2,
   "source_component": "guardrails-scanner-runtime",
-  "source_revision": "0f9b4f8c4fb2642af5853f12d0dc311d4aa59e12"
+  "source_revision": "e077282be855fbfd68b93dc5fcc26acaa57cc23f"
 }

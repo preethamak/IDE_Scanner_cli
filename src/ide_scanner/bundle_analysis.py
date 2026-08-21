@@ -48,6 +48,7 @@ _ENCODED_CHARACTER_RE = re.compile(r"\\x[0-9a-f]{2}|\\u[0-9a-f]{4}", re.I)
 _ROTATION_LOOP_RE = re.compile(r"while\s*\(\s*(?:!!\[\]|true)\s*\)", re.I)
 _ARRAY_PUSH_RE = re.compile(r"(?:\.push|\[\s*['\"]push['\"]\s*\])\s*\(", re.I)
 _ARRAY_SHIFT_RE = re.compile(r"(?:\.shift|\[\s*['\"]shift['\"]\s*\])\s*\(", re.I)
+_ROTATION_WINDOW_BYTES = 4_096
 
 
 def analyze_generated_bundle(text: str) -> dict[str, Any]:
@@ -61,11 +62,7 @@ def analyze_generated_bundle(text: str) -> dict[str, Any]:
     hex_integer_count = _bounded_count(_HEX_INTEGER_RE, text, limit=100_000)
     computed_member_count = _bounded_count(_COMPUTED_IDENTIFIER_RE, text, limit=10_000)
     encoded_character_count = _bounded_count(_ENCODED_CHARACTER_RE, text, limit=100_000)
-    array_rotation = bool(
-        _ROTATION_LOOP_RE.search(text)
-        and _ARRAY_PUSH_RE.search(text)
-        and _ARRAY_SHIFT_RE.search(text)
-    )
+    array_rotation = _has_local_array_rotation(text)
 
     obfuscation_indicators: list[str] = []
     if obfuscated_identifiers >= 25:
@@ -135,3 +132,21 @@ def _bounded_unique_count(pattern: re.Pattern[str], text: str, *, limit: int) ->
         if len(values) >= limit:
             break
     return len(values)
+
+
+def _has_local_array_rotation(text: str) -> bool:
+    """Recognize a rotation scaffold without correlating unrelated bundle code.
+
+    Large legitimate bundles can contain a polling ``while (true)`` loop plus
+    unrelated Array.push/shift calls megabytes away.  A string-array
+    obfuscator keeps all three operations in one compact initialization
+    scaffold, so require locality before treating this as structural
+    obfuscation.
+    """
+    for loop in _ROTATION_LOOP_RE.finditer(text):
+        start = max(0, loop.start() - 256)
+        end = min(len(text), loop.end() + _ROTATION_WINDOW_BYTES)
+        window = text[start:end]
+        if _ARRAY_PUSH_RE.search(window) and _ARRAY_SHIFT_RE.search(window):
+            return True
+    return False
