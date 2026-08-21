@@ -8,6 +8,8 @@ from pathlib import Path
 
 REQUIRED_FILES = {
     "guardrails_cli/engine_source.json",
+    "ide_scanner/calibration/scoring-v1.json",
+    "ide_scanner/contracts/capability-v1.json",
     "ide_scanner/provider_rules/semgrep/vscode-security.yml",
     "ide_scanner/provider_rules/yara/ide-scanner.yar",
 }

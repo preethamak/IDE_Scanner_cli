@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .artifact_store import ArtifactStore
 from .discovery import discover_from_path, discover_local_installations
 from .scanner import scan_targets
 
@@ -14,6 +15,9 @@ class ScanRequest:
     paths: list[Path | str] = field(default_factory=list)
     extension_ids: list[str] = field(default_factory=list)
     marketplace_scan_ids: list[str] = field(default_factory=list)
+    marketplace_version: str | None = None
+    marketplace_target_platform: str | None = None
+    marketplace_artifact_store: ArtifactStore | None = None
     include_fixtures: bool = False
     all_local: bool = False
     online: bool = False
@@ -23,6 +27,9 @@ class ScanRequest:
     sandbox_observations_file: Path | str | None = None
     previous_report_file: Path | str | None = None
     include_posture: bool = True
+    path_artifact_origin: str | None = None
+    artifact_url: str | None = None
+    artifact_sha256: str | None = None
 
 
 def build_inventory(paths: list[Path | str] | None = None, all_local: bool = False) -> dict[str, Any]:
@@ -48,6 +55,9 @@ def run_scan(request: ScanRequest) -> dict[str, Any]:
         paths=request.paths,
         extension_ids=request.extension_ids,
         marketplace_scan_ids=request.marketplace_scan_ids,
+        marketplace_version=request.marketplace_version,
+        marketplace_target_platform=request.marketplace_target_platform,
+        marketplace_artifact_store=request.marketplace_artifact_store,
         include_fixtures=request.include_fixtures,
         all_local=request.all_local,
         online=request.online,
@@ -57,6 +67,9 @@ def run_scan(request: ScanRequest) -> dict[str, Any]:
         sandbox_observations_file=request.sandbox_observations_file,
         previous_report_file=request.previous_report_file,
         include_posture=request.include_posture,
+        path_artifact_origin=request.path_artifact_origin,
+        artifact_url=request.artifact_url,
+        artifact_sha256=request.artifact_sha256,
     )
 
 

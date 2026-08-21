@@ -1,0 +1,205 @@
+{
+  "schema_version": "1",
+  "policy_version": "capability-contracts-1.0.0",
+  "classes": {
+    "theme": {
+      "keywords": [
+        "theme",
+        "icon theme",
+        "color scheme"
+      ],
+      "signals": [],
+      "expected": [
+        "activation",
+        "ide_contributions"
+      ],
+      "forbidden": [
+        "process_execution",
+        "credential_input",
+        "native_code"
+      ]
+    },
+    "formatter_linter": {
+      "keywords": [
+        "formatter",
+        "lint",
+        "eslint"
+      ],
+      "signals": [],
+      "expected": [
+        "activation",
+        "filesystem",
+        "ide_contributions",
+        "process_execution"
+      ],
+      "forbidden": [
+        "credential_input"
+      ]
+    },
+    "language_tool": {
+      "keywords": [
+        "language server",
+        "language support",
+        "intellisense"
+      ],
+      "signals": [
+        "native_code"
+      ],
+      "expected": [
+        "activation",
+        "filesystem",
+        "ide_contributions",
+        "native_code",
+        "packed_artifacts",
+        "process_execution"
+      ],
+      "forbidden": [
+        "credential_input"
+      ]
+    },
+    "coding_agent": {
+      "keywords": [
+        "coding agent",
+        "ai assistant",
+        "copilot"
+      ],
+      "signals": [
+        "agent_tools"
+      ],
+      "expected": [
+        "activation",
+        "filesystem",
+        "ide_contributions",
+        "network",
+        "process_execution"
+      ],
+      "forbidden": [
+        "credential_input"
+      ]
+    },
+    "security_tool": {
+      "keywords": [
+        "security",
+        "vulnerability",
+        "semgrep",
+        "snyk",
+        "sonarqube"
+      ],
+      "signals": [],
+      "expected": [
+        "activation",
+        "filesystem",
+        "ide_contributions",
+        "native_code",
+        "packed_artifacts",
+        "process_execution"
+      ],
+      "forbidden": []
+    },
+    "unknown": {
+      "keywords": [],
+      "signals": [],
+      "expected": [],
+      "forbidden": []
+    }
+  },
+  "extension_profiles": {
+    "dbaeumer.vscode-eslint": {
+      "id": "vscode-eslint-v1",
+      "class": "formatter_linter",
+      "publisher": "dbaeumer",
+      "repository_owners": [
+        "microsoft/vscode-eslint"
+      ],
+      "capabilities": [
+        "activation",
+        "dynamic_code",
+        "filesystem",
+        "ide_contributions",
+        "lifecycle_scripts",
+        "process_execution"
+      ]
+    },
+    "ms-python.python": {
+      "id": "vscode-python-v1",
+      "class": "language_tool",
+      "publisher": "ms-python",
+      "repository_owners": [
+        "microsoft/vscode-python"
+      ],
+      "capabilities": [
+        "activation",
+        "ide_contributions",
+        "lifecycle_scripts",
+        "native_code",
+        "packed_artifacts",
+        "process_execution"
+      ]
+    },
+    "rust-lang.rust-analyzer": {
+      "id": "rust-analyzer-v1",
+      "class": "language_tool",
+      "publisher": "rust-lang",
+      "repository_owners": [
+        "rust-lang/rust-analyzer"
+      ],
+      "capabilities": [
+        "activation",
+        "ide_contributions",
+        "native_code",
+        "packed_artifacts",
+        "process_execution"
+      ]
+    },
+    "semgrep.semgrep": {
+      "id": "semgrep-vscode-v1",
+      "class": "security_tool",
+      "publisher": "semgrep",
+      "repository_owners": [
+        "semgrep/semgrep-vscode"
+      ],
+      "capabilities": [
+        "activation",
+        "ide_contributions",
+        "lifecycle_scripts",
+        "native_code",
+        "packed_artifacts",
+        "process_execution"
+      ]
+    },
+    "snyk-security.snyk-vulnerability-scanner": {
+      "id": "snyk-vscode-v1",
+      "class": "security_tool",
+      "publisher": "snyk-security",
+      "repository_owners": [
+        "snyk/vscode-extension"
+      ],
+      "capabilities": [
+        "activation",
+        "credential_commands",
+        "credential_configuration",
+        "ide_contributions",
+        "lifecycle_scripts",
+        "native_code",
+        "packed_artifacts",
+        "process_execution"
+      ]
+    },
+    "sonarsource.sonarlint-vscode": {
+      "id": "sonarqube-vscode-v1",
+      "class": "security_tool",
+      "publisher": "sonarsource",
+      "repository_owners": [
+        "sonarsource/sonarlint-vscode"
+      ],
+      "capabilities": [
+        "activation",
+        "ide_contributions",
+        "lifecycle_scripts",
+        "native_code",
+        "packed_artifacts",
+        "process_execution"
+      ]
+    }
+  }
+}

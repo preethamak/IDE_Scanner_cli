@@ -7,9 +7,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .artifact_store import FilesystemArtifactStore
+
 from .agent import build_agent_report, upload_agent_report
 from .benchmarks.adapters.protect_your_secrets import write_normalized_dataset
 from .benchmarks.runner import run_credential_exposure_benchmark, write_benchmark_bundle
+from .benchmarks.production import evaluate_production_corpus
 from .discovery import discover_from_path, discover_local_installations
 from .report_bundle import iter_report_events, write_report_bundle
 from .sandbox_runner import run_sandbox
@@ -27,6 +30,14 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("--extension-id", "--marketplace", dest="extension_id", action="append", default=[], help="Extension identifier to check against online registries.")
     scan.add_argument("--version", help="Pin one Marketplace extension scan to an exact published version.")
     scan.add_argument("--target-platform", help="Pin a Marketplace artifact variant, for example darwin-x64.")
+    scan.add_argument("--artifact-store", help="Preserve downloaded Marketplace VSIX files in this private vault.")
+    scan.add_argument("--artifact-url", help="Final public HTTPS URL for a non-registry VSIX; requires --artifact-sha256.")
+    scan.add_argument("--artifact-sha256", help="Required SHA-256 for --artifact-url acquisition.")
+    scan.add_argument(
+        "--artifact-origin",
+        choices=["user_uploaded_vsix", "installed_directory", "local_directory", "archive_artifact", "source_snapshot"],
+        help="Provenance label for --path inputs; never implies that a source snapshot equals a published VSIX.",
+    )
     scan.add_argument("--profile", choices=["quick", "standard", "deep", "smart", "benchmark"], default="smart", help="Report label recorded in the bundle. Analysis depth is identical across profiles; only 'deep' additionally enables online registry checks (same as --online).")
     scan.add_argument("--format", choices=["terminal", "json", "bundle.json", "report.zip", "sarif", "sqlite"], default=None, help="Output format. Defaults to a readable terminal brief interactively, JSON when piped, and report.zip when --output ends in .zip.")
     scan.add_argument("--online", action="store_true", help="Enable registry and dependency vulnerability checks.")
@@ -44,6 +55,14 @@ def main(argv: list[str] | None = None) -> int:
     inventory = subparsers.add_parser("inventory", help="List discovered extension paths without scanning.")
     inventory.add_argument("--all", action="store_true", help="List local VS Code-compatible extension installs.")
     inventory.add_argument("--path", action="append", default=[], help="Extension folder, extensions directory, or VSIX file to inspect.")
+
+    artifacts = subparsers.add_parser("artifacts", help="Search preserved Marketplace artifact history.")
+    artifacts.add_argument("--store", required=True, help="Artifact vault directory.")
+    artifacts.add_argument("--extension-id")
+    artifacts.add_argument("--version")
+    artifacts.add_argument("--registry")
+    artifacts.add_argument("--target-platform")
+    artifacts.add_argument("--sha256")
 
     sandbox = subparsers.add_parser("sandbox", help="Create or run a disposable sandbox observation plan.")
     sandbox.add_argument("--path", required=True, help="Extension folder or VSIX file to sandbox.")
@@ -66,6 +85,19 @@ def main(argv: list[str] | None = None) -> int:
     benchmark_normalize.add_argument("--input", required=True, help="Input dataset file.")
     benchmark_normalize.add_argument("--out", "--output", dest="output", required=True, help="Output normalized JSON file.")
     benchmark_normalize.add_argument("--source-ref", default=None, help="Dataset reference URL or local commit.")
+
+    benchmark_production = benchmark_subparsers.add_parser(
+        "production",
+        help="Evaluate a scan report against the version-pinned production corpus gate.",
+    )
+    benchmark_production.add_argument("--corpus", required=True, help="Production corpus manifest JSON.")
+    benchmark_production.add_argument("--report", required=True, help="Scanner report JSON or report.zip.")
+    benchmark_production.add_argument("--out", "--output", dest="output", help="Write the gate result as JSON.")
+    benchmark_production.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        help="Exit non-zero when any required production gate fails.",
+    )
 
     agent = subparsers.add_parser("agent", help="Run a local scan and upload the report to ide-scanner-web.")
     agent.add_argument("--server", required=True, help="Base URL of the web app, for example http://127.0.0.1:8765.")
@@ -90,6 +122,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("scan --version requires exactly one --extension-id")
         if args.target_platform and len(args.extension_id) != 1:
             parser.error("scan --target-platform requires exactly one --extension-id")
+        if bool(args.artifact_url) != bool(args.artifact_sha256):
+            parser.error("scan --artifact-url and --artifact-sha256 must be provided together")
         report = scan_targets(
             paths=[Path(item) for item in args.path],
             marketplace_scan_ids=args.extension_id,
@@ -105,6 +139,10 @@ def main(argv: list[str] | None = None) -> int:
             sandbox_observations_file=args.sandbox_observations,
             previous_report_file=args.previous_report,
             required_providers=DEEP_REQUIRED_PROVIDERS if args.profile == "deep" else None,
+            marketplace_artifact_store=FilesystemArtifactStore(args.artifact_store) if args.artifact_store else None,
+            path_artifact_origin=args.artifact_origin,
+            artifact_url=args.artifact_url,
+            artifact_sha256=args.artifact_sha256,
         )
         output_format = _scan_output_format(args.output, args.format)
         source = _scan_source(args.installed, args.path, args.extension_id, args.fixtures)
@@ -148,6 +186,13 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"scan --format {output_format} is reserved but not implemented yet")
         _emit(report, args.output)
         return 0
+    if args.command == "artifacts":
+        store = FilesystemArtifactStore(args.store)
+        _emit({"artifacts": store.search(
+            extension_id=args.extension_id, version=args.version, registry=args.registry,
+            target_platform=args.target_platform, sha256=args.sha256,
+        )}, None)
+        return 0
     if args.command == "inventory":
         targets: list[dict[str, str]] = []
         for item in args.path:
@@ -161,6 +206,10 @@ def main(argv: list[str] | None = None) -> int:
         _emit(observations, args.out)
         return 0
     if args.command == "benchmark":
+        if args.benchmark_command == "production":
+            result = evaluate_production_corpus(args.corpus, args.report)
+            _emit(result, args.output)
+            return 1 if args.fail_on_regression and not result["gate"]["passed"] else 0
         if args.benchmark_command == "run":
             result = run_credential_exposure_benchmark(args.dataset, args.report)
             output_format = args.format or ("benchmark.zip" if args.output and args.output.lower().endswith(".zip") else "json")

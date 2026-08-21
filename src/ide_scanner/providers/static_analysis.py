@@ -5,6 +5,8 @@ import json
 import mmap
 import re
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,8 @@ from .runtime import (
     SEMGREP_RULES,
     SEMGREP_MAX_TARGET_BYTES,
     SEMGREP_RULE_TIMEOUT_SECONDS,
+    PROVIDER_FILE_SIZE_LIMIT_MB,
+    PROVIDER_MEMORY_LIMIT_MB,
     YARA_RULES,
     semgrep_config_arguments,
     semgrep_diagnostic,
@@ -82,6 +86,11 @@ def _run_semgrep(
     executable = str(status["executable"])
     if status["status"] != "available":
         return [], status
+    status.update({
+        "isolation": "subprocess",
+        "memory_limit_mb": PROVIDER_MEMORY_LIMIT_MB,
+        "file_size_limit_mb": PROVIDER_FILE_SIZE_LIMIT_MB,
+    })
     selected = targets if targets is not None else [root]
     status["target_count"] = len(selected)
     if not selected:
@@ -106,6 +115,8 @@ def _run_semgrep(
                 command,
                 timeout=semgrep_timeout_seconds(),
                 env=environment,
+                memory_limit_mb=PROVIDER_MEMORY_LIMIT_MB,
+                file_size_limit_mb=PROVIDER_FILE_SIZE_LIMIT_MB,
             )
         payload = json.loads(result.stdout or "{}")
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
@@ -229,6 +240,11 @@ def _run_yara(
     executable = str(status["executable"])
     if status["status"] != "available":
         return [], status
+    status.update({
+        "isolation": "subprocess",
+        "memory_limit_mb": PROVIDER_MEMORY_LIMIT_MB,
+        "file_size_limit_mb": PROVIDER_FILE_SIZE_LIMIT_MB,
+    })
     selected = targets
     status["target_count"] = len(selected) if selected is not None else None
     if executable == "yara-python":
@@ -237,14 +253,35 @@ def _run_yara(
         status.update({"status": "completed", "finding_count": 0, "files_analyzed": 0, "error": ""})
         return [], status
     findings: list[Finding] = []
+    target_file: Path | None = None
     try:
+        if selected is None:
+            scan_options = ["-r"]
+            scan_target = root
+        else:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", prefix="ide-scanner-native-yara-targets-", delete=False
+            ) as handle:
+                target_file = Path(handle.name)
+                for path in selected:
+                    resolved = str(path.resolve())
+                    if "\n" in resolved or "\r" in resolved:
+                        raise ValueError("YARA target path cannot contain a line break")
+                    handle.write(resolved + "\n")
+            scan_options = ["--scan-list"]
+            scan_target = target_file
         result = run_bounded_process(
-            [executable, "-N", "-r", str(YARA_RULES), str(root)],
+            [executable, "-N", *scan_options, str(YARA_RULES), str(scan_target)],
             timeout=120,
+            memory_limit_mb=PROVIDER_MEMORY_LIMIT_MB,
+            file_size_limit_mb=PROVIDER_FILE_SIZE_LIMIT_MB,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
         status.update({"status": "failed", "error_count": 1, "error": str(exc)})
         return [], status
+    finally:
+        if target_file is not None:
+            target_file.unlink(missing_ok=True)
     if result.returncode in {0, 1}:
         for line in result.stdout.splitlines():
             rule_name, separator, matched_path = line.partition(" ")
@@ -279,32 +316,83 @@ def _run_yara_python(
     status: dict[str, Any],
     targets: list[Path] | None = None,
 ) -> tuple[list[Finding], dict[str, Any]]:
+    target_paths = targets if targets is not None else [path for path in root.rglob("*") if path.is_file()]
+    target_file = None
     try:
-        import yara  # type: ignore[import-not-found]
-
-        rules = yara.compile(filepath=str(YARA_RULES))
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="ide-scanner-yara-targets-", delete=False) as handle:
+            target_file = Path(handle.name)
+            for path in target_paths:
+                if not path.is_file() or path.is_symlink():
+                    continue
+                try:
+                    handle.write(path.resolve().relative_to(root.resolve()).as_posix() + "\n")
+                except (OSError, ValueError):
+                    continue
+        result = run_bounded_process(
+            [
+                sys.executable,
+                "-m",
+                "ide_scanner.providers.yara_worker",
+                "--root", str(root),
+                "--rules", str(YARA_RULES),
+                "--targets", str(target_file),
+            ],
+            timeout=120,
+            memory_limit_mb=PROVIDER_MEMORY_LIMIT_MB,
+            file_size_limit_mb=PROVIDER_FILE_SIZE_LIMIT_MB,
+        )
+        payload = json.loads(result.stdout or "{}")
         findings: list[Finding] = []
-        scanned_files = 0
-        scan_targets = targets if targets is not None else list(root.rglob("*"))
-        for path in scan_targets:
-            if not path.is_file() or path.is_symlink():
+        for match in payload.get("matches") or []:
+            if not isinstance(match, dict):
                 continue
-            scanned_files += 1
-            for match in rules.match(str(path), timeout=5):
-                if match.rule not in _YARA_RULE_MAP:
-                    continue
-                rule_id, category, severity, evidence_class = _YARA_RULE_MAP[match.rule]
-                rel = path.relative_to(root).as_posix()
-                if _ignore_yara_match(match.rule, rel, path):
-                    continue
-                findings.append(_yara_finding(
-                    extension_id, version, match.rule, rule_id, category, severity, evidence_class, rel
-                ))
-        status.update({"status": "completed", "finding_count": len(findings), "files_analyzed": scanned_files})
+            rule_name = str(match.get("rule") or "")
+            rel = str(match.get("path") or "")
+            if rule_name not in _YARA_RULE_MAP or not rel:
+                continue
+            path = root.joinpath(*rel.split("/"))
+            rule_id, category, severity, evidence_class = _YARA_RULE_MAP[rule_name]
+            if _ignore_yara_match(rule_name, rel, path):
+                continue
+            findings.append(_yara_finding(
+                extension_id, version, rule_name, rule_id, category, severity, evidence_class, rel
+            ))
+        errors = payload.get("errors") if isinstance(payload.get("errors"), list) else []
+        completed = result.returncode == 0 and not errors and not payload.get("truncated")
+        status.update({
+            "status": "completed" if completed else "failed",
+            "finding_count": len(findings),
+            "files_analyzed": int(payload.get("files_analyzed") or 0),
+            "error_count": len(errors),
+            "errors": errors[:10],
+            "error": "" if completed else _yara_worker_error(result, errors, bool(payload.get("truncated"))),
+            "isolation": "subprocess",
+            "memory_limit_mb": PROVIDER_MEMORY_LIMIT_MB,
+            "file_size_limit_mb": PROVIDER_FILE_SIZE_LIMIT_MB,
+        })
         return findings, status
-    except Exception as exc:
-        status.update({"status": "failed", "error": str(exc)})
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError) as exc:
+        status.update({
+            "status": "failed",
+            "error_count": 1,
+            "error": str(exc)[:500],
+            "isolation": "subprocess",
+            "memory_limit_mb": PROVIDER_MEMORY_LIMIT_MB,
+            "file_size_limit_mb": PROVIDER_FILE_SIZE_LIMIT_MB,
+        })
         return [], status
+    finally:
+        if target_file is not None:
+            target_file.unlink(missing_ok=True)
+
+
+def _yara_worker_error(result: subprocess.CompletedProcess[str], errors: list[Any], truncated: bool) -> str:
+    if truncated:
+        return "YARA worker exceeded its bounded match output; results are incomplete."
+    if errors:
+        first = errors[0] if isinstance(errors[0], dict) else {"error": str(errors[0])}
+        return str(first.get("error") or "YARA worker reported an artifact error.")[:500]
+    return (result.stderr.strip() or f"YARA worker exited with status {result.returncode}.")[:500]
 
 
 def _resolved_targets(

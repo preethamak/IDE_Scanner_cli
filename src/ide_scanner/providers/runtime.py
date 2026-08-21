@@ -13,12 +13,19 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 
+try:
+    import resource
+except ImportError:  # pragma: no cover - Windows has no resource module
+    resource = None  # type: ignore[assignment]
+
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 SEMGREP_RULES = _PACKAGE_ROOT / "provider_rules" / "semgrep"
 YARA_RULES = _PACKAGE_ROOT / "provider_rules" / "yara" / "ide-scanner.yar"
 SEMGREP_MAX_TARGET_BYTES = 256 * 1024
 SEMGREP_RULE_TIMEOUT_SECONDS = 15
+PROVIDER_MEMORY_LIMIT_MB = 1536
+PROVIDER_FILE_SIZE_LIMIT_MB = 64
 
 
 def semgrep_timeout_seconds() -> int:
@@ -41,11 +48,15 @@ def run_bounded_process(
     *,
     timeout: int | float,
     env: dict[str, str] | None = None,
+    memory_limit_mb: int | None = None,
+    file_size_limit_mb: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a provider without allowing timed-out descendants to survive."""
     popen_options: dict[str, Any] = {}
     if os.name == "posix":
         popen_options["start_new_session"] = True
+        if resource is not None and (memory_limit_mb or file_size_limit_mb):
+            popen_options["preexec_fn"] = _resource_limiter(memory_limit_mb, file_size_limit_mb)
     elif os.name == "nt":
         popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     process = subprocess.Popen(
@@ -63,6 +74,20 @@ def run_bounded_process(
         stdout, stderr = process.communicate()
         raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _resource_limiter(memory_limit_mb: int | None, file_size_limit_mb: int | None):
+    def apply_limits() -> None:
+        if resource is None:
+            return
+        if memory_limit_mb:
+            limit = int(memory_limit_mb) * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+        if file_size_limit_mb:
+            limit = int(file_size_limit_mb) * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+    return apply_limits
 
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:

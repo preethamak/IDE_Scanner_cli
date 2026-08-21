@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import gzip
+import hashlib
 import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import urllib.error
 import urllib.request
@@ -13,6 +14,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 from typing import Any
+
+from .providers.runtime import run_bounded_process
 
 MARKETPLACE_EXTENSIONQUERY_URL = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1"
 OPENVSX_API_URL = "https://open-vsx.org/api"
@@ -25,6 +28,8 @@ STALE_REPOSITORY_DAYS = 730
 MARKETPLACE_BATCH_SIZE = 25
 OSV_BATCH_SIZE = 100
 VSIX_ASSET_TYPE = "Microsoft.VisualStudio.Services.VSIXPackage"
+VSIX_SIGNATURE_ASSET_TYPE = "Microsoft.VisualStudio.Services.VsixSignature"
+VSIX_SHA256_PROPERTY = "Microsoft.VisualStudio.Services.VsixSha256"
 MAX_VSIX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 MAX_CONFIGURED_VSIX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 VSIX_DOWNLOAD_TIMEOUT = 30
@@ -198,13 +203,21 @@ def download_marketplace_vsix(
     try:
         with os.fdopen(fd, "wb") as handle:
             failures: list[str] = []
+            downloaded_registry = ""
             for candidate_url in download_urls:
                 handle.seek(0)
                 handle.truncate(0)
                 try:
                     _download_to_file(candidate_url, handle, max_bytes=max_bytes, timeout=timeout)
+                    downloaded_registry = "openvsx" if "open-vsx.org" in candidate_url else "vs-marketplace"
                     if registry_out is not None:
-                        registry_out["registry"] = "openvsx" if "open-vsx.org" in candidate_url else "vs-marketplace"
+                        registry_out.update({
+                            "extension_id": resolved_id,
+                            "version": str(target_version),
+                            "registry": downloaded_registry,
+                            "target_platform": target_platform or "",
+                            "download_url": candidate_url,
+                        })
                     break
                 except MarketplaceDownloadError as exc:
                     failures.append(str(exc))
@@ -222,7 +235,44 @@ def download_marketplace_vsix(
         raise MarketplaceDownloadError(f"Downloaded VSIX for {resolved_id} was empty.")
 
     _degzip_if_needed(out_path)
+    # The gallery query currently returns integrity properties for its selected
+    # version/variant. Never apply that digest to a user-pinned older release or
+    # a target-platform-qualified artifact unless the metadata identifies the
+    # exact same artifact; doing so would reject legitimate packages.
+    integrity_metadata_matches = (
+        str(metadata.get("version") or "") == str(target_version)
+        and not target_platform
+        and metadata.get("registry") == "vs-marketplace"
+        and downloaded_registry == "vs-marketplace"
+    )
+    expected_sha256 = str(metadata.get("vsix_sha256") or "").strip().lower() if integrity_metadata_matches else ""
+    if expected_sha256:
+        actual_sha256 = _sha256_file(out_path)
+        if actual_sha256 != expected_sha256:
+            out_path.unlink(missing_ok=True)
+            raise MarketplaceDownloadError(
+                f"Downloaded VSIX for {resolved_id}@{target_version} failed the registry SHA-256 check."
+            )
+        if registry_out is not None:
+            registry_out.update({
+                "expected_sha256": expected_sha256,
+                "sha256_verified": "true",
+            })
+    if registry_out is not None:
+        registry_out.update({
+            "signature_asset_declared": "true" if integrity_metadata_matches and metadata.get("signature_asset_declared") else "false",
+            "signature_asset_url": str(metadata.get("signature_asset_url") or "") if integrity_metadata_matches else "",
+            "integrity_metadata_matches_artifact": "true" if integrity_metadata_matches else "false",
+        })
     return out_path
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _bounded_positive_env(name: str, default: int, upper_bound: int) -> int:
@@ -358,14 +408,36 @@ def _degzip_if_needed(path: Path) -> None:
     if header != b"\x1f\x8b":
         return
     decompressed_fd, decompressed_name = tempfile.mkstemp(prefix="ide-scanner-mkt-gunzip-", suffix=".vsix", dir=str(path.parent))
+    os.close(decompressed_fd)
+    Path(decompressed_name).unlink(missing_ok=True)
     try:
-        with gzip.open(path, "rb") as source, os.fdopen(decompressed_fd, "wb") as target:
-            while True:
-                chunk = source.read(1024 * 1024)
-                if not chunk:
-                    break
-                target.write(chunk)
-    except OSError as exc:
+        completed = run_bounded_process(
+            [
+                sys.executable,
+                "-m",
+                "ide_scanner.providers.artifact_worker",
+                "--operation",
+                "unwrap-gzip",
+                "--input",
+                str(path),
+                "--output",
+                decompressed_name,
+            ],
+            timeout=180,
+            memory_limit_mb=512,
+            file_size_limit_mb=2048,
+        )
+        payload = json.loads(completed.stdout or "{}")
+        if (
+            completed.returncode != 0
+            or payload.get("schema_version") != "1"
+            or payload.get("status") != "complete"
+            or not isinstance(payload.get("gzip"), dict)
+            or not Path(decompressed_name).is_file()
+        ):
+            error = str(payload.get("error") or completed.stderr or "gzip worker returned an invalid response")[:500]
+            raise MarketplaceDownloadError(error)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, MarketplaceDownloadError) as exc:
         Path(decompressed_name).unlink(missing_ok=True)
         raise MarketplaceDownloadError(f"Downloaded VSIX was gzip-encoded but could not be decompressed: {exc}") from exc
     os.replace(decompressed_name, path)
@@ -679,6 +751,18 @@ def _normalize_marketplace_extension(extension_id: str, raw: dict[str, Any]) -> 
     versions = raw.get("versions") if isinstance(raw.get("versions"), list) else []
     latest_version = versions[0] if versions and isinstance(versions[0], dict) else {}
     stats = _marketplace_stats(raw.get("statistics"))
+    files = latest_version.get("files") if isinstance(latest_version.get("files"), list) else []
+    properties = latest_version.get("properties") if isinstance(latest_version.get("properties"), list) else []
+    assets = {
+        str(item.get("assetType") or ""): str(item.get("source") or "")
+        for item in files
+        if isinstance(item, dict) and item.get("assetType")
+    }
+    version_properties = {
+        str(item.get("key") or ""): str(item.get("value") or "")
+        for item in properties
+        if isinstance(item, dict) and item.get("key")
+    }
     metadata = {
         "extension_id": extension_id,
         "found": True,
@@ -693,6 +777,9 @@ def _normalize_marketplace_extension(extension_id: str, raw: dict[str, Any]) -> 
         "rating_average": float(stats.get("averagerating") or stats.get("averageRating") or 0),
         "rating_count": int(stats.get("ratingcount") or stats.get("ratingCount") or 0),
         "registry": "vs-marketplace",
+        "vsix_sha256": version_properties.get(VSIX_SHA256_PROPERTY, "").lower(),
+        "signature_asset_declared": VSIX_SIGNATURE_ASSET_TYPE in assets,
+        "signature_asset_url": assets.get(VSIX_SIGNATURE_ASSET_TYPE, ""),
     }
     return metadata
 

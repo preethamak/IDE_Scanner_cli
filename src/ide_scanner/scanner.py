@@ -6,19 +6,26 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any
 
+from .artifact_store import ArtifactStore, ArtifactStoreError, StoredArtifact, artifact_store_from_environment
+from .artifact_input import ArtifactInputError, acquire_https_vsix
+
 from .ast_analyzer import (
     JS_AST_EXTS,
+    JS_AST_MAX_INPUT_BYTES,
     JS_AST_MAX_OLD_SPACE_MB,
     JS_AST_TIMEOUT_ATTEMPTS,
     JS_AST_TIMEOUT_SECONDS,
     analyze_js_source_status,
     node_available,
 )
+from .calibration import calibrated_score, max_calibrated_score
 from .classification_policy import (
     POLICY_VERSION,
     effective_finding_severity,
@@ -29,11 +36,23 @@ from .classification_policy import (
 from .discovery import discover_from_path, discover_local_installations
 from .jsonc import loads_jsonc
 from .models import ExtensionReport, Finding
+from .module_flow import (
+    MAX_FLOW_DEPTH,
+    MAX_FLOW_MODULES,
+    MAX_FLOW_PATHS,
+    FlowAnalysisLimitError,
+    credential_exfiltration_flow,
+    has_integrity_gate,
+    module_flow_coverage,
+    module_summary,
+    remote_vsix_install_flow,
+)
+from .value_flow import credential_value_flow
 from .public_outcomes import apply_public_assessment
 from .rule_registry import RULESET_VERSION
 from .posture import scan_posture, summarize_posture
 from .providers import run_static_providers
-from .providers.runtime import SEMGREP_MAX_TARGET_BYTES
+from .providers.runtime import SEMGREP_MAX_TARGET_BYTES, run_bounded_process
 from .registry import (
     MarketplaceDownloadError,
     _degzip_if_needed,
@@ -78,6 +97,7 @@ DOCUMENTATION_PREVIEW_EXTS = {".md", ".markdown", ".rst"}
 BINARY_RISK_EXTS = {".dll", ".dylib", ".exe", ".node", ".so"}
 PACKED_RISK_EXTS = {".7z", ".asar", ".gz", ".jar", ".rar", ".tar", ".tgz", ".war", ".zip"}
 DEEP_REQUIRED_PROVIDERS = frozenset({"semgrep", "yara", "dependency_intelligence"})
+ARTIFACT_ORIGINS = frozenset({"user_uploaded_vsix", "installed_directory", "local_directory", "archive_artifact", "source_snapshot"})
 SKIP_DIRS = {".git", ".hg", ".svn"}
 MAX_TEXT_BYTES = 64 * 1024 * 1024
 MAX_SOURCE_PREVIEW_BYTES = 200 * 1024
@@ -104,6 +124,8 @@ OBSERVED_RULES = {
 CORRELATED_RULES = {
     "agent-data-exfil-chain",
     "credential-exfiltration-chain",
+    "credential-harvesting-exfiltration",
+    "credential-identifier-flow-to-network",
     "destructive-transfer-chain",
     "download-and-execute",
     "install-download-execute",
@@ -111,6 +133,7 @@ CORRELATED_RULES = {
     "install-shell-obfuscation",
     "obfuscation-execution-network",
     "persistence-chain",
+    "remote-vsix-install-chain",
     "supply-chain-dropper-chain",
 }
 BLOCKING_CORRELATED_RULES = CORRELATED_RULES - {"download-and-execute"}
@@ -233,16 +256,35 @@ def scan_targets(
     previous_report_file: Path | str | None = None,
     include_posture: bool = True,
     required_providers: set[str] | frozenset[str] | None = None,
+    marketplace_artifact_store: ArtifactStore | None = None,
+    path_artifact_origin: str | None = None,
+    artifact_url: str | None = None,
+    artifact_sha256: str | None = None,
 ) -> dict[str, Any]:
     targets: list[dict[str, str]] = []
     root = Path.cwd()
 
     if include_fixtures:
         targets.extend(discover_from_path(root / "fixtures"))
+    if path_artifact_origin is not None and path_artifact_origin not in ARTIFACT_ORIGINS:
+        raise ValueError(f"Unsupported path artifact origin: {path_artifact_origin}")
     for path in paths or []:
-        targets.extend(discover_from_path(path))
+        discovered = discover_from_path(path)
+        for target in discovered:
+            origin = path_artifact_origin or (
+                "user_uploaded_vsix" if target.get("type") == "vsix" else "local_directory"
+            )
+            if target.get("type") == "vsix" and origin in {"installed_directory", "local_directory", "source_snapshot"}:
+                raise ValueError(f"Artifact origin {origin} cannot describe a VSIX file")
+            if target.get("type") != "vsix" and origin in {"user_uploaded_vsix", "archive_artifact"}:
+                raise ValueError(f"Artifact origin {origin} requires a VSIX file")
+            target["artifact_origin"] = origin
+        targets.extend(discovered)
     if all_local:
-        targets.extend(discover_local_installations())
+        installed = discover_local_installations()
+        for target in installed:
+            target["artifact_origin"] = "installed_directory"
+        targets.extend(installed)
 
     unique: dict[str, dict[str, str]] = {}
     for target in targets:
@@ -260,9 +302,14 @@ def scan_targets(
             version=marketplace_version,
             target_platform=marketplace_target_platform,
             known_bad_hashes=known_bad_hashes,
+            artifact_store=marketplace_artifact_store,
         )
         for identifier in marketplace_scan_ids or []
     )
+    if artifact_url or artifact_sha256:
+        if not artifact_url or not artifact_sha256:
+            raise ValueError("artifact_url and artifact_sha256 must be provided together")
+        extensions.append(scan_remote_artifact(artifact_url, artifact_sha256, known_bad_hashes))
     _apply_threat_feed(extensions, _load_threat_feed(threat_feed_file))
     advisory_bundle = _load_extension_advisories(extension_advisories_file)
     _apply_extension_advisories(extensions, advisory_bundle)
@@ -453,7 +500,6 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
     findings: list[Finding] = []
     capabilities: dict[str, dict[str, Any]] = {}
     scanned_files = 0
-    executable_sources: list[tuple[str, str]] = []
     source_previews: list[dict[str, Any]] = []
     js_ast_statuses: list[str] = []
     js_ast_failed_paths: list[str] = []
@@ -481,6 +527,7 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
         ),
     )
     captured_preview_paths: set[str] = set()
+    module_summaries: list[dict[str, Any]] = []
     primary_readme = next(
         (
             candidate
@@ -526,12 +573,13 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
         if file.stat().st_size > MAX_TEXT_BYTES:
             analysis_coverage["oversized_files"].append(rel)
             continue
-        encoded_text = text.encode("utf-8")
+        text_size = file.stat().st_size
         if (
             rel not in captured_preview_paths
             and len(source_previews) < MAX_SOURCE_PREVIEWS
-            and len(encoded_text) <= MAX_SOURCE_PREVIEW_BYTES
+            and text_size <= MAX_SOURCE_PREVIEW_BYTES
         ):
+            encoded_text = text.encode("utf-8")
             source_previews.append({
                 "path": rel,
                 "content": text,
@@ -546,7 +594,7 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
         # turning identical source into a resource-dependent timeout.
         if suffix in JS_AST_EXTS:
             generated_blob = _is_generated_code_blob(rel, text)
-            semgrep_exclusion = _semgrep_scope_exclusion(text, len(encoded_text))
+            semgrep_exclusion = _semgrep_scope_exclusion(text, text_size)
             if semgrep_exclusion:
                 analysis_coverage["provider_scopes"]["semgrep"]["excluded_files"].append({
                     "path": rel,
@@ -563,8 +611,10 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
                     ast_unparsed_entrypoints.append(rel)
         if suffix in EXEC_TEXT_EXTS:
             analysis_coverage["analyzed_executable_files"].append(rel)
-            executable_sources.append((rel, text))
+            if suffix in JS_AST_EXTS:
+                module_summaries.append(module_summary(rel, text))
             _add_code_findings(extension_id, version, rel, text, findings, capabilities)
+            _add_workspace_cli_path_findings(extension_id, version, manifest, [(rel, text)], findings)
         if suffix in EXEC_TEXT_EXTS or suffix in {".html", ".htm"}:
             _add_webview_csp_findings(
                 extension_id,
@@ -575,7 +625,77 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
                 report_missing=not (suffix in JS_AST_EXTS and _is_generated_code_blob(rel, text)),
             )
 
-    _add_workspace_cli_path_findings(extension_id, version, manifest, executable_sources, findings)
+    flow_entrypoints = {item for item in entrypoints if Path(item).suffix.lower() in JS_AST_EXTS}
+    module_flow_status = {
+        "provider": "module_flow",
+        "status": "completed",
+        "required": True,
+        "modules": len(module_summaries),
+        "entrypoints": sorted(flow_entrypoints),
+        "max_modules": MAX_FLOW_MODULES,
+        "max_depth": MAX_FLOW_DEPTH,
+        "max_paths": MAX_FLOW_PATHS,
+    }
+    try:
+        flow_coverage = module_flow_coverage(module_summaries, flow_entrypoints)
+        module_flow_status.update(flow_coverage)
+        if flow_coverage["unresolved_executable_import_count"]:
+            module_flow_status.update({
+                "status": "failed",
+                "error": "reachable relative executable imports could not be resolved",
+                "error_count": flow_coverage["unresolved_executable_import_count"],
+            })
+        cross_file_vsix_flow = remote_vsix_install_flow(module_summaries, flow_entrypoints)
+        cross_file_credential_flow = credential_exfiltration_flow(module_summaries, flow_entrypoints)
+    except FlowAnalysisLimitError as exc:
+        cross_file_vsix_flow = None
+        cross_file_credential_flow = None
+        module_flow_status.update({"status": "failed", "error": str(exc), "error_count": 1})
+    if cross_file_vsix_flow:
+        findings.append(_finding(
+            extension_id,
+            version,
+            "remote-vsix-install-chain",
+            "execution",
+            "HIGH",
+            0.92,
+            "Import-connected modules download, write, and install a remote VSIX without visible integrity verification.",
+            cross_file_vsix_flow["files"],
+            "Block silent remote extension installation or require independently trusted integrity verification and explicit approval.",
+            {
+                "evidence_class": "correlated",
+                "correlation": "cross-file-import-connected-semantic-chain",
+                "source": "remote-download",
+                "transform": "local-vsix-write",
+                "sink": "workbench.extensions.installExtension",
+                "integrity_verification": False,
+                "stages": cross_file_vsix_flow["stages"],
+                "import_path": cross_file_vsix_flow["import_path"],
+            },
+        ))
+
+    if cross_file_credential_flow:
+        findings.append(_finding(
+            extension_id,
+            version,
+            "credential-harvesting-exfiltration",
+            "credential-access",
+            "HIGH",
+            0.95,
+            "A directed module path reads multiple credential families, serializes collected data, and writes it to a network request body.",
+            cross_file_credential_flow["files"],
+            "Block the extension and investigate the credential sources, transformations, and destination.",
+            {
+                "evidence_class": "correlated",
+                "correlation": "cross-file-import-directed-semantic-chain",
+                "source": "multi-family-credential-file-read",
+                "transform": "serialization",
+                "sink": "network-request-body",
+                "credential_families": cross_file_credential_flow["credential_families"],
+                "stages": cross_file_credential_flow["stages"],
+                "import_path": cross_file_credential_flow["import_path"],
+            },
+        ))
 
     if ast_unparsed_entrypoints:
         # A declared activation entrypoint whose source the AST layer cannot
@@ -622,6 +742,7 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
     analysis_coverage["providers"] = {
         "native_static": {"provider": "native_static", "status": "completed", "required": True},
         "javascript_ast": _javascript_ast_provider_status(js_ast_statuses, js_ast_failed_paths),
+        "module_flow": module_flow_status,
         **provider_statuses,
     }
     analysis_coverage["manifest_validation"] = {
@@ -678,7 +799,13 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
     return report
 
 
-def scan_vsix(path: Path, known_bad_hashes: dict[str, dict[str, Any]] | None = None) -> ExtensionReport:
+def scan_vsix(
+    path: Path,
+    known_bad_hashes: dict[str, dict[str, Any]] | None = None,
+    artifact_origin: str = "user_uploaded_vsix",
+) -> ExtensionReport:
+    if artifact_origin not in ARTIFACT_ORIGINS:
+        raise ValueError(f"Unsupported VSIX artifact origin: {artifact_origin}")
     original_path = path.expanduser().resolve()
     with tempfile.TemporaryDirectory(prefix="ide-scanner-vsix-src-") as src_tmp:
         # Some upload/download sources (browser fetches, the marketplace
@@ -701,6 +828,7 @@ def scan_vsix(path: Path, known_bad_hashes: dict[str, dict[str, Any]] | None = N
             report.artifact_inventory["vsix_hash"] = vsix_hash
             report.artifact_inventory["vsix_size_bytes"] = vsix_size
             report.artifact_inventory["source_artifact"] = original_path.name
+            report.artifact_inventory["artifact_origin"] = artifact_origin
             report.artifact_inventory["vsix_signature"] = _vsix_signature_status(tmp_root)
             _record_archive_anomalies(report, archive_anomalies)
             report.instance_id = _stable_id(
@@ -711,6 +839,8 @@ def scan_vsix(path: Path, known_bad_hashes: dict[str, dict[str, Any]] | None = N
                 "version": report.version,
                 "sha256": vsix_hash,
                 "source": "vsix",
+                "artifact_origin": artifact_origin,
+                "original_registry_artifact": False,
                 "signature": dict(report.artifact_inventory["vsix_signature"]),
             }
         _apply_vsix_known_bad_match(report, known_bad_hashes or {})
@@ -729,8 +859,16 @@ def _scan_discovered_target(target: dict[str, str], known_bad_hashes: dict[str, 
     path = Path(target["path"])
     try:
         if target.get("type") == "vsix":
-            return scan_vsix(path, known_bad_hashes=known_bad_hashes)
-        return scan_extension(path, source=target.get("type", "vscode"), known_bad_hashes=known_bad_hashes)
+            return scan_vsix(
+                path,
+                known_bad_hashes=known_bad_hashes,
+                artifact_origin=target.get("artifact_origin", "user_uploaded_vsix"),
+            )
+        report = scan_extension(path, source=target.get("type", "vscode"), known_bad_hashes=known_bad_hashes)
+        origin = target.get("artifact_origin", "local_directory")
+        report.artifact_inventory["artifact_origin"] = origin
+        report.artifact_identity.update({"artifact_origin": origin, "original_registry_artifact": False})
+        return report
     except Exception as exc:  # noqa: BLE001 - isolate any per-artifact failure
         return _local_error_extension(path, target.get("type", "vscode"), f"{type(exc).__name__}: {exc}")
 
@@ -780,6 +918,7 @@ def scan_marketplace_extension(
     version: str | None = None,
     target_platform: str | None = None,
     known_bad_hashes: dict[str, dict[str, Any]] | None = None,
+    artifact_store: ArtifactStore | None = None,
 ) -> ExtensionReport:
     """Download a VSIX from the VS Marketplace gallery and run the normal
     quarantine-extraction static scan on it (scan_vsix). This is a hosted,
@@ -801,8 +940,22 @@ def scan_marketplace_extension(
     except MarketplaceDownloadError as exc:
         return _marketplace_error_extension(resolved_id, str(exc))
 
+    stored: StoredArtifact | None = None
     try:
-        report = scan_vsix(vsix_path, known_bad_hashes=known_bad_hashes)
+        configured_store = artifact_store if artifact_store is not None else artifact_store_from_environment()
+        scan_path = vsix_path
+        if configured_store is not None:
+            stored = configured_store.preserve(
+                vsix_path,
+                extension_id=registry_source.get("extension_id", resolved_id),
+                version=registry_source.get("version", version or ""),
+                registry=registry_source.get("registry", "vs-marketplace"),
+                target_platform=registry_source.get("target_platform", target_platform or ""),
+            )
+            scan_path = stored.path
+        report = scan_vsix(scan_path, known_bad_hashes=known_bad_hashes, artifact_origin="archive_artifact")
+    except ArtifactStoreError as exc:
+        return _marketplace_error_extension(resolved_id, f"Downloaded VSIX could not be preserved: {exc}")
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         return _marketplace_error_extension(resolved_id, f"Downloaded VSIX could not be scanned: {exc}")
     finally:
@@ -818,7 +971,79 @@ def scan_marketplace_extension(
 
     report.source = registry_source.get("registry", "marketplace")
     report.install_path = f"{report.source}:{resolved_id}"
+    report.artifact_identity.update({
+        "registry": report.source,
+        "artifact_origin": f"{report.source}_original",
+        "original_registry_artifact": True,
+        "target_platform": registry_source.get("target_platform", target_platform or ""),
+        "preserved": stored is not None,
+    })
+    report.artifact_inventory["artifact_origin"] = f"{report.source}_original"
+    _apply_marketplace_integrity(report, registry_source)
+    if stored is not None:
+        storage = {
+            "backend": stored.backend, "storage_key": stored.storage_key,
+            "sha256": stored.sha256, "size_bytes": stored.size_bytes,
+            "first_seen": stored.first_seen, "last_seen": stored.last_seen,
+        }
+        report.artifact_identity["storage"] = storage
+        report.artifact_inventory["artifact_storage"] = storage
     return report
+
+
+def scan_remote_artifact(
+    url: str,
+    expected_sha256: str,
+    known_bad_hashes: dict[str, dict[str, Any]] | None = None,
+) -> ExtensionReport:
+    """Acquire and scan a hash-pinned non-registry VSIX without trusting its claimed origin."""
+    try:
+        path = acquire_https_vsix(url, expected_sha256)
+    except ArtifactInputError as exc:
+        return _local_error_extension(Path("remote-artifact.vsix"), "artifact-url-error", str(exc))
+    try:
+        report = scan_vsix(path, known_bad_hashes=known_bad_hashes, artifact_origin="archive_artifact")
+        report.install_path = "artifact-url:[redacted]"
+        report.artifact_identity.update({
+            "artifact_origin": "archive_artifact",
+            "original_registry_artifact": False,
+            "expected_sha256": expected_sha256.lower(),
+            "sha256_verified": report.artifact_hash == expected_sha256.lower(),
+        })
+        report.artifact_inventory["artifact_origin"] = "archive_artifact"
+        return report
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def _apply_marketplace_integrity(report: ExtensionReport, registry_source: dict[str, str]) -> None:
+    expected_sha256 = registry_source.get("expected_sha256", "").lower()
+    sha256_verified = registry_source.get("sha256_verified") == "true"
+    signature_declared = registry_source.get("signature_asset_declared") == "true"
+    metadata_matches = registry_source.get("integrity_metadata_matches_artifact") == "true"
+    signature = {
+        "present": signature_declared,
+        "verified": False,
+        "verification_supported": False,
+        "source": "marketplace-detached-asset" if signature_declared else "marketplace-metadata",
+        "reason": (
+            "detached-signature-declared-but-not-cryptographically-verified"
+            if signature_declared
+            else "no-detached-signature-declared"
+            if metadata_matches
+            else "exact-artifact-signature-metadata-unavailable"
+        ),
+        "metadata_matches_artifact": metadata_matches,
+        "package_integrity": {
+            "algorithm": "sha256",
+            "expected": expected_sha256,
+            "actual": report.artifact_hash,
+            "matched": bool(expected_sha256 and sha256_verified and expected_sha256 == report.artifact_hash),
+            "source": "vs-marketplace-version-property" if expected_sha256 else "unavailable",
+        },
+    }
+    report.artifact_inventory["vsix_signature"] = signature
+    report.artifact_identity["signature"] = dict(signature)
 
 
 def _marketplace_error_extension(identifier: str, message: str) -> ExtensionReport:
@@ -1523,6 +1748,12 @@ def _add_code_findings(
     has_configured_cli = has_exec_file and bool(re.search(r"getConfiguration\(|config\.get\(|executablePath|cliPath", text))
     has_editor_input = bool(re.search(r"activeTextEditor|document\.getText|selection|workspace\.workspaceFolders|uri\.fsPath|fileName", text))
     has_persistence = bool(re.search(r"(\.bashrc|\.zshrc|\.profile|crontab|launchagents|runonce|scheduledtask|systemd|update_rc|startup\s*folder)", text, re.I))
+    has_remote_vsix_install = bool(re.search(
+        r"(?:workbench\.extensions\.installExtension|commands\.executeCommand\s*\(\s*['\"]workbench\.extensions\.installExtension)",
+        text,
+        re.I,
+    ))
+    has_integrity_verification = has_integrity_gate(text)
     # A standalone "mcp" token is common in documentation, error messages, and
     # word lists. Require an actual agent API or protocol identifier before using
     # it as one leg of an exfiltration chain.
@@ -1532,6 +1763,67 @@ def _add_code_findings(
         re.I,
     ))
     secret_regex = _combined_secret_regex(secret_refs)
+
+    identifier_credential_flow = credential_value_flow(text)
+    if identifier_credential_flow:
+        findings.append(_finding(
+            extension_id,
+            version,
+            "credential-identifier-flow-to-network",
+            "credential-access",
+            "HIGH",
+            0.94,
+            "A credential-file value flows through identifier assignments into an outbound request body.",
+            [rel],
+            "Block the extension and inspect the exact credential source and outbound destination.",
+            {"evidence_class": "correlated", **identifier_credential_flow},
+        ))
+
+    # Credential stealers commonly split collection and transmission across
+    # helper functions specifically to defeat same-window scanners.  Require a
+    # deliberately narrow combination before correlating package-wide: several
+    # independent credential families, recursive/home-directory collection,
+    # serialization, and an explicit outbound write.  This catches systematic
+    # harvesting without promoting ordinary authenticated API clients or tools
+    # that read a single credential file.
+    if _has_systematic_credential_harvesting_exfiltration(text, secret_refs):
+        findings.append(_finding(
+            extension_id,
+            version,
+            "credential-harvesting-exfiltration",
+            "credential-access",
+            "HIGH",
+            0.93,
+            "Code systematically collects multiple credential families and serializes them to an outbound request.",
+            [rel],
+            "Block the extension and investigate the collection paths and network destinations.",
+            {
+                "evidence_class": "correlated",
+                "correlation": "same-file-interprocedural-semantic-chain",
+                "credential_families": sorted(secret_id for secret_id, _ in secret_refs),
+            },
+        ))
+
+    if has_remote_vsix_install and has_download and has_file_write and not has_integrity_verification:
+        findings.append(_finding(
+            extension_id,
+            version,
+            "remote-vsix-install-chain",
+            "execution",
+            "HIGH",
+            0.9,
+            "Code downloads a VSIX, writes it locally, and invokes the IDE extension installer without visible integrity verification.",
+            [rel],
+            "Block silent remote extension installation or require an independently trusted signature/hash and explicit user approval.",
+            {
+                "evidence_class": "correlated",
+                "correlation": "same-file-semantic-chain",
+                "source": "remote-download",
+                "transform": "local-vsix-write",
+                "sink": "workbench.extensions.installExtension",
+                "integrity_verification": False,
+            },
+        ))
 
     for rule in CODE_RULES:
         if not rule.regex.search(text):
@@ -2135,6 +2427,40 @@ def _has_direct_credential_network_flow(text: str, secret_pattern: re.Pattern[st
         if re.search(rf"(?:body\s*:\s*{variable}\b|(?:write|send|post)\s*\(\s*{variable}\b)", tail):
             return True
     return False
+
+
+def _has_systematic_credential_harvesting_exfiltration(
+    text: str,
+    secret_refs: list[tuple[str, str]],
+) -> bool:
+    """Recognize a high-specificity, cross-function credential theft chain.
+
+    This is intentionally stricter than file-wide source/sink co-occurrence.
+    Every leg represents attacker behavior seen in credential harvesters, while
+    the family-count threshold keeps normal credential providers contextual.
+    """
+    if len({secret_id for secret_id, _ in secret_refs}) < 3:
+        return False
+    collection_root = re.search(r"\b(?:os\.)?homedir\s*\(|\buserInfo\s*\(", text)
+    enumerates_files = re.search(r"\b(?:fs\.)?(?:readdir|readdirSync)\s*\(", text)
+    reads_files = FILE_READ_RE.search(text)
+    harvesting_model = re.search(
+        r"\b(?:phrases|passwords|apiKeys|awsKeys|privateKeys|vaults|wallets|mnemonic|seedPhrase)s?\b",
+        text,
+        re.I,
+    )
+    serializes = re.search(r"\b(?:JSON\.stringify|Buffer\.from)\s*\(", text)
+    outbound_request = re.search(r"\bhttps?\.request\s*\(", text)
+    outbound_write = re.search(r"\b(?:req|request)\.write\s*\(", text)
+    return all((
+        collection_root,
+        enumerates_files,
+        reads_files,
+        harvesting_model,
+        serializes,
+        outbound_request,
+        outbound_write,
+    ))
 
 
 def _manifest_configuration_items(contributes: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2860,51 +3186,22 @@ def _vsix_signature_status(root: Path) -> dict[str, Any]:
 
 
 def _artifact_inventory(path: Path, files: list[Path]) -> dict[str, Any]:
-    inventory = _empty_artifact_inventory()
-    package_digest = hashlib.sha256()
-    all_hashes: list[dict[str, Any]] = []
-    risky_artifacts: list[dict[str, Any]] = []
-    total_bytes = 0
-
-    for file in sorted(files):
-        rel = file.relative_to(path).as_posix()
-        if file.is_symlink():
-            try:
-                target = os.readlink(file)
-            except OSError:
-                target = "unreadable"
-            digest = hashlib.sha256(target.encode("utf-8", errors="replace")).hexdigest()
-            size = len(target.encode("utf-8", errors="replace"))
-            all_hashes.append({"path": rel, "sha256": digest, "size_bytes": size, "kind": "symlink", "target": target})
-            risky_artifacts.append({"path": rel, "sha256": digest, "size_bytes": size, "kind": "symlink", "target": target})
-            package_digest.update(rel.encode("utf-8"))
-            package_digest.update(b"\0symlink\0")
-            package_digest.update(target.encode("utf-8", errors="replace"))
-            package_digest.update(b"\0")
-            continue
-        digest, size = _hash_file(file)
-        if not digest:
-            continue
-        total_bytes += size
-        all_hashes.append({"path": rel, "sha256": digest, "size_bytes": size})
-        package_digest.update(rel.encode("utf-8"))
-        package_digest.update(b"\0")
-        package_digest.update(digest.encode("ascii"))
-        package_digest.update(b"\0")
-        suffix = file.suffix.lower()
-        if suffix in BINARY_RISK_EXTS or suffix in PACKED_RISK_EXTS:
-            risky_artifacts.append({
-                "path": rel,
-                "sha256": digest,
-                "size_bytes": size,
-                "kind": "native" if suffix in BINARY_RISK_EXTS else "packed",
-            })
-
-    inventory["package_hash"] = package_digest.hexdigest() if all_hashes else ""
-    inventory["files_hashed"] = len(all_hashes)
-    inventory["total_bytes_hashed"] = total_bytes
-    inventory["risky_artifacts"] = risky_artifacts
-    inventory["_all_file_hashes"] = all_hashes
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="ide-scanner-inventory-", suffix=".json") as targets:
+        json.dump([file.relative_to(path).as_posix() for file in files], targets)
+        targets.flush()
+        command = [
+            sys.executable, "-m", "ide_scanner.providers.artifact_worker",
+            "--operation", "inventory", "--root", str(path.resolve()), "--targets", targets.name,
+        ]
+        environment = _worker_environment()
+        try:
+            completed = run_bounded_process(command, timeout=300, memory_limit_mb=768, env=environment)
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError("artifact inventory worker timed out") from exc
+    payload = _artifact_worker_payload(completed, "artifact inventory")
+    inventory = payload.get("inventory")
+    if not isinstance(inventory, dict) or not isinstance(inventory.get("_all_file_hashes"), list):
+        raise ValueError("artifact inventory worker omitted inventory metadata")
     return inventory
 
 
@@ -3022,57 +3319,50 @@ def _hash_metadata(metadata: Any, source_path: str) -> dict[str, Any]:
 
 
 def _safe_extract_vsix(vsix_path: Path, destination: Path) -> dict[str, Any]:
-    """Extract a VSIX with resource + traversal limits, returning anomalies.
+    """Extract an untrusted VSIX in a time- and memory-bounded subprocess."""
+    command = [
+        sys.executable,
+        "-m",
+        "ide_scanner.providers.artifact_worker",
+        "--vsix",
+        str(vsix_path.resolve()),
+        "--destination",
+        str(destination.resolve()),
+    ]
+    try:
+        completed = run_bounded_process(command, timeout=180, memory_limit_mb=512, env=_worker_environment())
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("VSIX extraction worker timed out") from exc
+    payload = _artifact_worker_payload(completed, "VSIX extraction")
+    anomalies = payload.get("anomalies")
+    if not isinstance(anomalies, dict):
+        raise ValueError("VSIX extraction worker omitted anomaly metadata")
+    return anomalies
 
-    Members that would escape the destination (path traversal) or that carry a
-    symlink mode are refused and recorded rather than silently dropped, so a
-    crafted archive cannot make files disappear from the analyzed set while the
-    scan still claims complete coverage. The returned dict is attached to the
-    report so these anomalies surface as coverage limitations."""
-    anomalies: dict[str, list[str]] = {"traversal_members": [], "symlink_members": [], "special_members": []}
-    with zipfile.ZipFile(vsix_path) as archive:
-        members = archive.infolist()
-        files = [member for member in members if member.filename and not member.is_dir()]
-        total_size = sum(member.file_size for member in files)
-        compressed_size = sum(max(1, member.compress_size) for member in files)
-        if len(files) > MAX_ARCHIVE_FILES:
-            raise ValueError(f"VSIX contains too many files ({len(files)} > {MAX_ARCHIVE_FILES})")
-        if total_size > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
-            raise ValueError("VSIX uncompressed size exceeds the extraction limit")
-        if total_size / max(1, compressed_size) > MAX_ARCHIVE_COMPRESSION_RATIO:
-            raise ValueError("VSIX compression ratio exceeds the extraction limit")
-        extracted_bytes = 0
-        for member in members:
-            name = member.filename.replace("\\", "/")
-            if not name or name.endswith("/"):
-                continue
-            # Reject symlinks and other special (non-regular) members: a symlink
-            # inside the archive could be dereferenced by later analysis to read
-            # outside the extraction root.
-            mode = (member.external_attr >> 16) & 0o170000
-            if mode == 0o120000:
-                anomalies["symlink_members"].append(name)
-                continue
-            if mode and mode not in (0o100000, 0o040000):
-                anomalies["special_members"].append(name)
-                continue
-            target = (destination / name).resolve()
-            if destination.resolve() not in target.parents and target != destination.resolve():
-                anomalies["traversal_members"].append(name)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member) as source, target.open("wb") as handle:
-                while True:
-                    chunk = source.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    extracted_bytes += len(chunk)
-                    if extracted_bytes > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
-                        # The central-directory sizes are attacker-supplied; enforce
-                        # the real byte cap during the write loop as well.
-                        raise ValueError("VSIX extracted bytes exceeded the extraction limit")
-                    handle.write(chunk)
-    return {key: value for key, value in anomalies.items() if value}
+
+def _worker_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    source_root = str(Path(__file__).resolve().parent.parent)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        item for item in (source_root, environment.get("PYTHONPATH", "")) if item
+    )
+    return environment
+
+
+def _artifact_worker_payload(completed: subprocess.CompletedProcess[str], operation: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        detail = completed.stderr.strip()[:500]
+        raise ValueError(f"{operation} worker returned invalid output: {detail}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{operation} worker returned invalid output")
+    if completed.returncode != 0 or payload.get("status") != "complete":
+        detail = str(payload.get("error") or completed.stderr or "unknown worker failure")[:500]
+        raise ValueError(f"{operation} worker failed: {detail}")
+    if payload.get("schema_version") != "1":
+        raise ValueError(f"{operation} worker returned an unsupported schema")
+    return payload
 
 
 def _record_archive_anomalies(report: "ExtensionReport", anomalies: dict[str, list[str]]) -> None:
@@ -3504,6 +3794,7 @@ def _javascript_ast_provider_status(statuses: list[str], failed_paths: list[str]
         "timeout_seconds_per_file": JS_AST_TIMEOUT_SECONDS,
         "max_timeout_attempts": JS_AST_TIMEOUT_ATTEMPTS,
         "max_old_space_mb": JS_AST_MAX_OLD_SPACE_MB,
+        "max_input_bytes_per_file": JS_AST_MAX_INPUT_BYTES,
     }
     if not statuses:
         # No JS/TS files were reachable; nothing for this provider to do.
@@ -3524,6 +3815,11 @@ def _javascript_ast_provider_status(statuses: list[str], failed_paths: list[str]
             record["failed_paths"] = sorted(set(failed_paths))
         if "node-missing" in reasons:
             record["error"] = "Node runtime unavailable; JavaScript AST analysis did not run."
+        elif "resource-skipped" in reasons:
+            record["error"] = (
+                "AST analysis skipped one or more files larger than the "
+                f"{JS_AST_MAX_INPUT_BYTES:,}-byte per-file memory-safety limit."
+            )
     elif unparsed:
         record["status"] = "completed"
         record["note"] = (
@@ -3939,17 +4235,10 @@ def _score_basis(components: dict[str, int]) -> tuple[str, str]:
 
 
 def _confirmed_score(findings: list[Finding]) -> int:
-    if any(finding.rule_id == "known-bad-artifact" for finding in findings):
-        return 100
-    if any(finding.rule_id == "marketplace-removed-malware" for finding in findings):
-        return 100
+    rule_ids = {finding.rule_id for finding in findings}
     if any(finding.rule_id == "marketplace-removed-package" and _is_removed_malware(finding.evidence) for finding in findings):
         return 100
-    if any(finding.rule_id == "malicious-npm-dependency" for finding in findings):
-        return 98
-    if any(finding.rule_id == "trusted-threat-feed-hit" for finding in findings):
-        return 100
-    return 0
+    return max_calibrated_score("confirmed_intelligence", rule_ids)
 
 
 def _correlated_score(findings: list[Finding]) -> int:
@@ -3961,78 +4250,12 @@ def _correlated_score(findings: list[Finding]) -> int:
         for finding in findings
         if _finding_evidence_class(finding) == "correlated"
     }
-    score = 0
-    if "install-secret-access" in rule_ids:
-        score = max(score, 86)
-    if "install-shell-obfuscation" in rule_ids:
-        score = max(score, 84)
-    if "install-download-execute" in rule_ids:
-        score = max(score, 82)
-    if "credential-exfiltration-chain" in rule_ids:
-        score = max(score, 87)
-    if "destructive-transfer-chain" in rule_ids:
-        score = max(score, 83)
-    if "obfuscation-execution-network" in rule_ids:
-        score = max(score, 80)
-    if "persistence-chain" in rule_ids:
-        score = max(score, 82)
-    if "agent-data-exfil-chain" in rule_ids:
-        score = max(score, 84)
-    if "supply-chain-dropper-chain" in rule_ids:
-        score = max(score, 76)
-    if "download-and-execute" in rule_ids:
-        score = max(score, 72)
-    if "credential-dataflow-to-network" in rule_ids:
-        score = max(score, 88)
-    if "credential-dataflow-to-process" in rule_ids:
-        score = max(score, 78)
-    if "credential-dataflow-to-file" in rule_ids:
-        score = max(score, 76)
-    if "credential-command-control" in rule_ids:
-        score = max(score, 74)
-    if "clipboard-read-near-secret-input" in rule_ids:
-        score = max(score, 72)
-    if "untrusted-workspace-input-to-process" in rule_ids:
-        score = max(score, 82)
-    if "webview-message-to-process" in rule_ids:
-        score = max(score, 84)
-    if any(
-        finding.rule_id in {"decoded-payload-execution", "encoded-dynamic-execution"}
-        and _finding_evidence_class(finding) == "correlated"
-        for finding in findings
-    ):
-        score = max(score, 82)
-    return score
+    return max_calibrated_score("correlated_behavior", rule_ids)
 
 
 def _capability_score(findings: list[Finding]) -> int:
-    score = 0
-    for finding in findings:
-        if finding.rule_id in {"agent-shell-tool", "agent-filesystem-tool", "agent-network-tool"}:
-            score = max(score, 48)
-        elif finding.rule_id == "mcp-server-command":
-            score = max(score, 44)
-        elif finding.rule_id == "agent-prompt-injection-sink":
-            score = max(score, 42)
-        elif finding.rule_id == "agentic-tooling":
-            score = max(score, 41)
-        elif finding.rule_id == "lifecycle-script":
-            score = max(score, 38)
-        elif finding.rule_id == "native-or-packed-artifact":
-            score = max(score, 36)
-        elif finding.rule_id == "dynamic-shell-execution":
-            score = max(score, 40)
-        elif finding.rule_id in {"untrusted-input-execution", "untrusted-workspace-input-to-process"}:
-            score = max(score, 38)
-        elif finding.rule_id in {"broad-activation", "sensitive-activation", "powerful-ide-contribution"}:
-            score = max(score, 30)
-        elif finding.rule_id == "webview-csp-unsafe-directive":
-            score = max(score, 34)
-        elif finding.rule_id == "webview-csp-missing":
-            score = max(score, 28)
-        elif finding.rule_id == "startup-activation":
-            score = max(score, 20)
-    return score
+    rule_ids = {finding.rule_id for finding in findings}
+    return max_calibrated_score("sensitive_capability", rule_ids)
 
 
 def _provenance_score(findings: list[Finding]) -> int:
@@ -4055,15 +4278,13 @@ def _dependency_score(findings: list[Finding]) -> int:
         if finding.category != "dependency":
             continue
         if finding.rule_id == "malicious-npm-dependency":
-            score = max(score, 98)
+            score = max(score, calibrated_score("dependency", finding.rule_id))
         elif finding.rule_id == "vulnerable-npm-dependency":
             exact = bool((finding.evidence or {}).get("exact"))
             if exact:
-                score = max(score, 65)
-        elif finding.rule_id == "mutable-dependency-source":
-            score = max(score, 46)
-        elif finding.rule_id == "unpinned-dependency":
-            score = max(score, 28)
+                score = max(score, calibrated_score("dependency", "vulnerable-npm-dependency-exact"))
+        else:
+            score = max(score, calibrated_score("dependency", finding.rule_id))
     return score
 
 
@@ -4077,103 +4298,27 @@ def _vulnerability_score(findings: list[Finding]) -> int:
 
 def _observed_score(findings: list[Finding]) -> int:
     rule_ids = {finding.rule_id for finding in findings}
-    score = 0
-    if "observed-secret-exfil" in rule_ids:
-        score = max(score, 89)
-    if "observed-destructive-behavior" in rule_ids:
-        score = max(score, 88)
-    if "observed-download-execute" in rule_ids:
-        score = max(score, 84)
-    if "observed-persistence" in rule_ids:
-        score = max(score, 82)
-    if "observed-secret-read" in rule_ids:
-        score = max(score, 52)
-    if "observed-unexpected-network" in rule_ids:
-        score = max(score, 38)
-    if "observed-process-exec" in rule_ids:
-        score = max(score, 36)
-    if "observed-filesystem-write" in rule_ids:
-        score = max(score, 22)
-    return score
+    return max_calibrated_score("observed_behavior", rule_ids)
 
 
 def _proven_observed_score(findings: list[Finding]) -> int:
     rule_ids = {finding.rule_id for finding in findings}
-    if "observed-secret-exfil" in rule_ids:
-        return 89
-    if "observed-destructive-behavior" in rule_ids:
-        return 88
-    if "observed-download-execute" in rule_ids:
-        return 84
-    if "observed-persistence" in rule_ids:
-        return 82
-    return 0
+    return max_calibrated_score("proven_observed_behavior", rule_ids)
 
 
 def _posture_score(findings: list[Finding]) -> int:
-    score = 0
-    for finding in findings:
-        if finding.rule_id == "dangerous-github-workflow":
-            score = max(score, 44)
-        elif finding.rule_id == "workflow-token-permissions-broad":
-            score = max(score, 34)
-        elif finding.rule_id == "repo-binary-artifacts":
-            score = max(score, 32)
-    return score
+    rule_ids = {finding.rule_id for finding in findings}
+    return max_calibrated_score("posture", rule_ids)
 
 
 def _exposure_score(findings: list[Finding]) -> int:
-    score = 0
-    for finding in findings:
-        if finding.rule_id == "credential-dataflow-to-network":
-            score = max(score, 92)
-        elif finding.rule_id == "credential-source-near-network":
-            score = max(score, 54)
-        elif finding.rule_id in {"credential-source-near-process", "credential-source-near-file"}:
-            score = max(score, 48)
-        elif finding.rule_id == "agent-sensitive-data-near-network":
-            score = max(score, 46)
-        elif finding.rule_id in {"credential-input-near-state", "clipboard-near-credential-surface"}:
-            score = max(score, 52)
-        elif finding.rule_id == "unrestricted-workspace-cli-path":
-            score = max(score, 72)
-        elif finding.rule_id in {"credential-command-control", "clipboard-read-near-secret-input"}:
-            score = max(score, 72)
-        elif finding.rule_id in {"credential-dataflow-to-process", "credential-dataflow-to-file"}:
-            score = max(score, 68)
-        elif finding.rule_id in {"credential-config-update", "credential-global-state-storage"}:
-            score = max(score, 58)
-        elif finding.rule_id == "credential-inputbox-prompt":
-            score = max(score, 42)
-        elif finding.rule_id == "credential-command-execution":
-            score = max(score, 40)
-        elif finding.rule_id in {"credential-config-key", "credential-global-state-key", "credential-command-registration"}:
-            score = max(score, 24)
-    return score
+    rule_ids = {finding.rule_id for finding in findings}
+    return max_calibrated_score("cross_extension_exposure", rule_ids)
 
 
 def _reputation_score(findings: list[Finding]) -> int:
-    score = 0
-    for finding in findings:
-        if _finding_evidence_class(finding) != "reputation":
-            continue
-        if finding.rule_id == "marketplace-extension-not-found":
-            score = max(score, 12)
-        elif finding.rule_id == "marketplace-unverified-publisher":
-            score = max(score, 8)
-        elif finding.rule_id == "marketplace-low-install-count":
-            score = max(score, 8)
-        elif finding.rule_id == "marketplace-low-rating":
-            score = max(score, 10)
-        elif finding.rule_id == "marketplace-stale-extension":
-            score = max(score, 8)
-        elif finding.rule_id == "install-rating-mismatch":
-            score = max(score, 10)
-        elif finding.rule_id in {"repo-archived", "repo-stale"}:
-            score = max(score, 8)
-        elif finding.rule_id in {"repo-url-missing", "security-policy-missing", "license-missing"}:
-            score = max(score, 6)
-    return score
+    rule_ids = {finding.rule_id for finding in findings if _finding_evidence_class(finding) == "reputation"}
+    return max_calibrated_score("reputation", rule_ids)
 
 
 def _suppressors(findings: list[Finding]) -> list[dict[str, Any]]:

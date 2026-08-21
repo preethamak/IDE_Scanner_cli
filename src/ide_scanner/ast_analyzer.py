@@ -9,12 +9,15 @@ from typing import Any
 
 JS_AST_EXTS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
 _WALKER_PATH = Path(__file__).parent / "js_ast" / "walker.js"
-# Deep analysis reads generated entrypoints up to the scanner's 64 MiB text
-# boundary. Acorn can require roughly 1.5 GiB and about a minute for a bundle
-# near that limit on a single CPU. Keep both limits fixed and report them in
-# provider metadata so the coverage boundary is reproducible.
+# Keep AST work below the scanner's overall text boundary. Acorn's in-memory
+# tree can amplify a generated bundle by tens of times; allowing a 64 MiB input
+# and a 2 GiB V8 heap can make the operating system kill the entire scanner
+# before it can report incomplete coverage. Larger entrypoints retain bounded
+# raw-text and YARA coverage, while the AST provider fails closed with the
+# explicit ``resource-skipped`` status.
 JS_AST_TIMEOUT_SECONDS = 90
-JS_AST_MAX_OLD_SPACE_MB = 2048
+JS_AST_MAX_INPUT_BYTES = 32 * 1024 * 1024
+JS_AST_MAX_OLD_SPACE_MB = 1024
 JS_AST_TIMEOUT_ATTEMPTS = 2
 
 _node_available: bool | None = None
@@ -40,9 +43,13 @@ def analyze_js_source_status(rel: str, text: str) -> tuple[list[dict[str, Any]],
     exceeded the time budget), ``error`` (spawn/OS error), or ``malformed``
     (walker crashed or its output could not be parsed). Callers use the status
     to report truthful provider coverage instead of silently treating every
-    failure as "no findings"."""
+    failure as "no findings". ``resource-skipped`` means the source exceeded
+    the explicit AST input budget and therefore makes required AST coverage
+    incomplete rather than risking termination of the whole scan."""
     if not node_available():
         return [], "node-missing"
+    if len(text) > JS_AST_MAX_INPUT_BYTES or len(text.encode("utf-8")) > JS_AST_MAX_INPUT_BYTES:
+        return [], "resource-skipped"
     try:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=Path(rel).suffix or ".js", delete=False) as handle:
             handle.write(text)

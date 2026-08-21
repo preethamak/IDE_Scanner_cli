@@ -1,0 +1,117 @@
+{
+  "schema_version": "1",
+  "policy_version": "3.1.0-calibration.2",
+  "description": "Versioned scoring thresholds. Verdict authority gates remain in classification_policy.py and scanner.py.",
+  "components": {
+    "confirmed_intelligence": {
+      "known-bad-artifact": 100,
+      "marketplace-removed-malware": 100,
+      "malicious-npm-dependency": 98,
+      "trusted-threat-feed-hit": 100
+    },
+    "observed_behavior": {
+      "observed-secret-exfil": 89,
+      "observed-destructive-behavior": 88,
+      "observed-download-execute": 84,
+      "observed-persistence": 82,
+      "observed-secret-read": 52,
+      "observed-unexpected-network": 38,
+      "observed-process-exec": 36,
+      "observed-filesystem-write": 22
+    },
+    "proven_observed_behavior": {
+      "observed-secret-exfil": 89,
+      "observed-destructive-behavior": 88,
+      "observed-download-execute": 84,
+      "observed-persistence": 82
+    },
+    "correlated_behavior": {
+      "install-secret-access": 86,
+      "install-shell-obfuscation": 84,
+      "install-download-execute": 82,
+      "credential-exfiltration-chain": 87,
+      "credential-harvesting-exfiltration": 89,
+      "credential-identifier-flow-to-network": 90,
+      "destructive-transfer-chain": 83,
+      "obfuscation-execution-network": 80,
+      "persistence-chain": 82,
+      "agent-data-exfil-chain": 84,
+      "supply-chain-dropper-chain": 76,
+      "download-and-execute": 72,
+      "remote-vsix-install-chain": 86,
+      "credential-dataflow-to-network": 88,
+      "credential-dataflow-to-process": 78,
+      "credential-dataflow-to-file": 76,
+      "credential-command-control": 74,
+      "clipboard-read-near-secret-input": 72,
+      "untrusted-workspace-input-to-process": 82,
+      "webview-message-to-process": 84,
+      "decoded-payload-execution": 82,
+      "encoded-dynamic-execution": 82
+    },
+    "sensitive_capability": {
+      "agent-shell-tool": 48,
+      "agent-filesystem-tool": 48,
+      "agent-network-tool": 48,
+      "mcp-server-command": 44,
+      "agent-prompt-injection-sink": 42,
+      "agentic-tooling": 41,
+      "lifecycle-script": 38,
+      "native-or-packed-artifact": 36,
+      "dynamic-shell-execution": 40,
+      "untrusted-input-execution": 38,
+      "untrusted-workspace-input-to-process": 38,
+      "broad-activation": 30,
+      "sensitive-activation": 30,
+      "powerful-ide-contribution": 30,
+      "webview-csp-unsafe-directive": 34,
+      "webview-csp-missing": 28,
+      "startup-activation": 20
+    },
+    "dependency": {
+      "malicious-npm-dependency": 98,
+      "vulnerable-npm-dependency-exact": 65,
+      "mutable-dependency-source": 46,
+      "unpinned-dependency": 28
+    },
+    "posture": {
+      "dangerous-github-workflow": 44,
+      "workflow-token-permissions-broad": 34,
+      "repo-binary-artifacts": 32
+    },
+    "cross_extension_exposure": {
+      "credential-dataflow-to-network": 92,
+      "credential-source-near-network": 54,
+      "credential-source-near-process": 48,
+      "credential-source-near-file": 48,
+      "agent-sensitive-data-near-network": 46,
+      "credential-input-near-state": 52,
+      "clipboard-near-credential-surface": 52,
+      "unrestricted-workspace-cli-path": 72,
+      "credential-command-control": 72,
+      "clipboard-read-near-secret-input": 72,
+      "credential-dataflow-to-process": 68,
+      "credential-dataflow-to-file": 68,
+      "credential-config-update": 58,
+      "credential-global-state-storage": 58,
+      "credential-inputbox-prompt": 42,
+      "credential-command-execution": 40,
+      "credential-config-key": 24,
+      "credential-global-state-key": 24,
+      "credential-command-registration": 24
+    },
+    "reputation": {
+      "marketplace-extension-not-found": 12,
+      "marketplace-unverified-publisher": 8,
+      "marketplace-low-install-count": 8,
+      "marketplace-low-rating": 10,
+      "marketplace-stale-extension": 8,
+      "install-rating-mismatch": 10,
+      "repo-archived": 8,
+      "repo-stale": 8,
+      "repo-url-missing": 6,
+      "security-policy-missing": 6,
+      "license-missing": 6
+    }
+  }
+}

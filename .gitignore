@@ -13,6 +13,10 @@ build/
 !src/guardrails_cli/engine_source.json
 !src/ide_scanner/intelligence/
 !src/ide_scanner/intelligence/extension-advisories.json
+!src/ide_scanner/calibration/
+!src/ide_scanner/calibration/scoring-v1.json
+!src/ide_scanner/contracts/
+!src/ide_scanner/contracts/capability-v1.json
 *.html
 *.md.tmp
 .DS_Store

@@ -32,14 +32,14 @@ CODE_RULES = [
     # finding needs an identifiable OS-process API, not a name collision.
     Rule("process-execution", "execution", "LOW", 0.54, "Extension can spawn local processes. Common for language servers and debuggers.", re.compile(r"(?:\b(?:child_process|cp)\s*\.\s*(?:exec|execSync|execFile|execFileSync|spawn|spawnSync)\s*\(|require\s*\(\s*['\"](?:node:)?child_process['\"]\s*\)\s*\.\s*(?:exec|execSync|execFile|execFileSync|spawn|spawnSync)\s*\(|\b(?:execSync|execFile|execFileSync|spawnSync)\s*\(|\bProcessBuilder\b|Runtime\.getRuntime\(\)\.exec)"), "process_execution"),
     Rule("network-access", "network", "LOW", 0.48, "Extension performs network requests. Not malicious by itself.", re.compile(r"\b(fetch\(|axios\.|https?\.request|XMLHttpRequest|WebSocket|request\.write|req\.write|OkHttpClient|HttpClient|URLConnection)"), "network"),
-    Rule("filesystem-access", "filesystem", "LOW", 0.42, "Extension reads or writes local files. Expected for many developer tools.", re.compile(r"\b(fs\.(readFile|readFileSync|writeFile|readdir|createReadStream|createWriteStream)|workspace\.fs|FileInputStream|FileOutputStream)"), "filesystem"),
+    Rule("filesystem-access", "filesystem", "LOW", 0.42, "Extension reads or writes local files. Expected for many developer tools.", re.compile(r"\b(fs\.(?:promises\.)?(readFile|readFileSync|writeFile|readdir|createReadStream|createWriteStream)|workspace\.fs|FileInputStream|FileOutputStream)"), "filesystem"),
     Rule("dynamic-code-loading", "code", "MEDIUM", 0.66, "Extension uses dynamic code loading or evaluation.", re.compile(r"\b(eval\(|new Function\(|vm\.runIn|import\s*\(|URLClassLoader|ClassLoader\.defineClass)"), "dynamic_code"),
     Rule("obfuscation", "code", "LOW", 0.46, "Extension contains obfuscation indicators.", re.compile(r"(atob\(|Buffer\.from\([^)]*,\s*['\"]base64['\"]|(?:\\x[0-9a-fA-F]{2}){4,}|[A-Za-z0-9+/]{220,}={0,2})"), "obfuscation"),
     Rule("destructive-file-pattern", "filesystem", "MEDIUM", 0.76, "Extension contains recursive or forceful destructive file operation patterns.", re.compile(r"\b(rm\s+-rf|rmSync\([^)]*recursive\s*:\s*true)\b"), "destructive_file_activity"),
 ]
 
-FILE_READ_RE = re.compile(r"\b(fs\.(readFile|readFileSync|createReadStream)|workspace\.fs\.readFile|FileInputStream|readText|readBytes)\b")
-FILE_WRITE_RE = re.compile(r"\b(fs\.(writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream)|workspace\.fs\.writeFile|FileOutputStream|writeText|writeBytes)\b")
+FILE_READ_RE = re.compile(r"\b(fs\.(?:promises\.)?(readFile|readFileSync|createReadStream)|workspace\.fs\.readFile|FileInputStream|readText|readBytes)\b")
+FILE_WRITE_RE = re.compile(r"\b(fs\.(?:promises\.)?(writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream)|workspace\.fs\.writeFile|FileOutputStream|writeText|writeBytes)\b")
 NETWORK_SINK_RE = re.compile(r"\b(?:fetch\s*\(|axios\.(?:post|put|request)\s*\(|https?\.request\s*\(|XMLHttpRequest\b|WebSocket\b|request\.write\s*\(|req\.write\s*\(|OkHttpClient\b|HttpClient\b|URLConnection\b)")
 ENCODE_ARCHIVE_RE = re.compile(r"\b(Buffer\.from|btoa\(|atob\(|base64|createGzip|archiver|adm-zip|JSZip|zip\b|createCipheriv|crypto\.publicEncrypt)\b", re.I)
 DESTRUCTIVE_RE = re.compile(r"\b(rm\s+-rf|rmSync\([^)]*recursive\s*:\s*true)\b")
