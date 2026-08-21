@@ -49,6 +49,7 @@ _ROTATION_LOOP_RE = re.compile(r"while\s*\(\s*(?:!!\[\]|true)\s*\)", re.I)
 _ARRAY_PUSH_RE = re.compile(r"(?:\.push|\[\s*['\"]push['\"]\s*\])\s*\(", re.I)
 _ARRAY_SHIFT_RE = re.compile(r"(?:\.shift|\[\s*['\"]shift['\"]\s*\])\s*\(", re.I)
 _ROTATION_WINDOW_BYTES = 4_096
+_ROTATION_CALL_SPAN_BYTES = 256
 
 
 def analyze_generated_bundle(text: str) -> dict[str, Any]:
@@ -147,6 +148,9 @@ def _has_local_array_rotation(text: str) -> bool:
         start = max(0, loop.start() - 256)
         end = min(len(text), loop.end() + _ROTATION_WINDOW_BYTES)
         window = text[start:end]
-        if _ARRAY_PUSH_RE.search(window) and _ARRAY_SHIFT_RE.search(window):
-            return True
+        for push in _ARRAY_PUSH_RE.finditer(window):
+            call_end = min(len(window), push.end() + _ROTATION_CALL_SPAN_BYTES)
+            shift = _ARRAY_SHIFT_RE.search(window, push.end(), call_end)
+            if shift is not None and ";" not in window[push.end():shift.start()]:
+                return True
     return False
