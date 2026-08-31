@@ -32,6 +32,7 @@ Common commands:
 guardrails scan --ide cursor --all --yes
 guardrails scan --extension publisher.extension
 guardrails scan --file extension.vsix
+guardrails brief --purpose "read and edit plist files" --marketplace ivhernandez.vscode-plist --marketplace mariano-g.plist-editor
 guardrails inventory --ide cursor --output team-inventory.json
 guardrails report verify report.zip
 guardrails help
@@ -40,6 +41,21 @@ guardrails help
 Guardrails reports the decision, risk score, malware evidence score, analysis
 coverage, provider status, and detailed findings. Reports can be exported as
 HTML, ZIP, JSON, or Markdown.
+
+## Pre-recommendation briefs
+
+Before an agent recommends a Marketplace extension, create a brief for the
+exact candidate artifacts. The brief contains an evidence gate, provenance
+signals, artifact SHA-256, Marketplace and GitHub maintenance signals, OSV
+dependency-advisory coverage, and decision-relevant rules. It does not install
+extensions or claim to prove an extension safe.
+
+```bash
+guardrails brief --purpose "read and edit plist files" \
+  --marketplace ivhernandez.vscode-plist \
+  --marketplace mariano-g.plist-editor \
+  --format json --output plist-risk-brief.json
+```
 
 ## Analysis profiles
 

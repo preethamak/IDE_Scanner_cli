@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -8,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from guardrails_cli import main as cli
+from guardrails_cli.risk_brief import build_risk_brief
 from guardrails_cli.ui.prompts import prompt_choice
 
 
@@ -123,6 +125,121 @@ class GuardrailsCliTests(unittest.TestCase):
             registry_snapshot="prior-report.json",
             required_providers=frozenset({"semgrep", "yara", "dependency_intelligence"}),
         )
+
+    def test_brief_scans_each_exact_candidate_and_fails_closed_for_review(self) -> None:
+        clean = {
+            "extensions": [{
+                "extension_id": "sample.clean", "version": "1.0.0", "publisher": "sample",
+                "decision": "allow", "decision_reason": "No decision-level evidence.",
+                "risk_score": 0, "malware_score": 0,
+                "analysis_coverage": {
+                    "status": "complete", "coverage_percent": 100,
+                    "providers": {"dependency_intelligence": {"status": "completed"}},
+                },
+                "artifact_identity": {"sha256": "a" * 64},
+                "provenance": {"tier": "verified", "publisher_verified": True, "artifact_identity_consistent": True},
+                "findings": [],
+            }],
+        }
+        review = {
+            "extensions": [{
+                "extension_id": "sample.review", "version": "2.0.0", "publisher": "sample",
+                "decision": "review", "decision_reason": "Requires context.",
+                "risk_score": 45, "malware_score": 0,
+                "analysis_coverage": {
+                    "status": "complete", "coverage_percent": 100,
+                    "providers": {"dependency_intelligence": {"status": "completed"}},
+                },
+                "artifact_identity": {"sha256": "b" * 64},
+                "provenance": {"tier": "unknown", "publisher_verified": False, "artifact_identity_consistent": True},
+                "findings": [{"rule_id": "process-execution", "actionability": "review"}],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "brief.json"
+            with patch("guardrails_cli.main.scan_marketplace", side_effect=[clean, review]) as scan:
+                code, _message, error = self.run_cli([
+                    "brief", "--purpose", "read plist files",
+                    "--marketplace", "sample.clean@1.0.0",
+                    "--marketplace", "sample.review@2.0.0",
+                    "--format", "json", "--output", str(output),
+                ])
+            payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual((code, error), (1, ""))
+        self.assertEqual(scan.call_count, 2)
+        self.assertEqual(payload["comparison"]["eligible_candidates"], ["sample.clean"])
+        gates = {candidate["extension_id"]: candidate["recommendation_gate"]["status"] for candidate in payload["candidates"]}
+        self.assertEqual(gates, {"sample.clean": "eligible_for_recommendation", "sample.review": "needs_human_review"})
+        self.assertIn("Do not recommend", payload["agent_policy"][0])
+
+    def test_brief_never_treats_incomplete_analysis_as_recommendable(self) -> None:
+        incomplete = {
+            "extensions": [{
+                "extension_id": "sample.incomplete", "version": "1.0.0", "publisher": "sample",
+                "decision": "incomplete", "analysis_coverage": {"status": "incomplete", "coverage_percent": 72},
+                "artifact_identity": {"sha256": ""}, "findings": [],
+            }],
+        }
+        with patch("guardrails_cli.main.scan_marketplace", return_value=incomplete):
+            code, output, error = self.run_cli([
+                "brief", "--purpose", "read plist files", "--marketplace", "sample.incomplete",
+            ])
+        self.assertEqual((code, error), (3, ""))
+        self.assertIn("insufficient_evidence", output)
+
+    def test_brief_exposes_raw_maintenance_and_advisory_signals(self) -> None:
+        report = {
+            "extensions": [{
+                "extension_id": "sample.maintained", "version": "1.0.0", "publisher": "sample",
+                "decision": "allow", "analysis_coverage": {
+                    "status": "complete", "coverage_percent": 100,
+                    "providers": {"dependency_intelligence": {"status": "completed"}},
+                },
+                "artifact_identity": {"sha256": "a" * 64},
+                "findings": [
+                    {
+                        "rule_id": "marketplace-verified-publisher", "evidence_class": "reputation",
+                        "evidence": {
+                            "evidence_class": "reputation", "registry": "vs-marketplace", "install_count": 1200,
+                            "rating_average": 4.7, "rating_count": 42, "last_updated": "2026-08-01T00:00:00Z",
+                        },
+                    },
+                    {
+                        "rule_id": "repo-maintained", "evidence_class": "reputation",
+                        "evidence": {
+                            "evidence_class": "reputation", "host": "github", "full_name": "sample/maintained",
+                            "stargazers_count": 321, "pushed_at": "2026-08-02T00:00:00Z", "archived": False, "fork": False,
+                        },
+                    },
+                ],
+            }],
+        }
+        brief = build_risk_brief([report], purpose="read plist files", profile="standard")
+        candidate = brief["candidates"][0]
+        self.assertEqual(candidate["reputation_signals"]["marketplace"]["install_count"], 1200)
+        self.assertEqual(candidate["reputation_signals"]["repository"]["full_name"], "sample/maintained")
+        self.assertEqual(candidate["dependency_advisory"], {
+            "coverage_status": "completed", "status": "no_osv_findings_observed", "finding_rules": [],
+        })
+
+    def test_brief_requires_review_when_osv_or_maintenance_findings_exist(self) -> None:
+        report = {
+            "extensions": [{
+                "extension_id": "sample.stale", "version": "1.0.0", "publisher": "sample",
+                "decision": "allow", "analysis_coverage": {
+                    "status": "complete", "coverage_percent": 100,
+                    "providers": {"dependency_intelligence": {"status": "completed"}},
+                },
+                "artifact_identity": {"sha256": "a" * 64},
+                "findings": [{
+                    "rule_id": "vulnerable-npm-dependency", "evidence_class": "dependency",
+                    "evidence": {"evidence_class": "dependency"},
+                }],
+            }],
+        }
+        candidate = build_risk_brief([report], purpose="read plist files", profile="standard")["candidates"][0]
+        self.assertEqual(candidate["recommendation_gate"]["status"], "needs_human_review")
+        self.assertIn("Dependency advisory findings", candidate["recommendation_gate"]["reason"])
 
     def test_installed_search_filters_before_selection(self) -> None:
         rows = [

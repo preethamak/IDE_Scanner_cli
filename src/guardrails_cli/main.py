@@ -18,6 +18,7 @@ from .exporters.markdown import export_markdown
 from .environment import doctor_checks
 from .help_manual import TOPICS, manual
 from .report_reader import read_report, report_view, validate_report
+from .risk_brief import brief_exit_code, build_risk_brief, render_risk_brief, write_risk_brief
 from .scan_service import run_with_profile, scan_installed
 from .scanner_adapter import (
     discover_paths,
@@ -55,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
             if arguments == ["scan"] and sys.stdin.isatty() and sys.stdout.isatty():
                 return interactive_application()
             return cmd_scan(args)
+        if args.command == "brief":
+            return cmd_brief(args)
         if args.command == "report":
             return cmd_report(args)
         if args.command == "rules":
@@ -118,6 +121,16 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--show-all", action="store_true", help="Print every installation in a multi-extension terminal report.")
     scan.add_argument("--yes", action="store_true", help="Skip confirmation before scanning all matching installations.")
     scan.add_argument("--fail-on", choices=("block", "review", "never"), default="block", help="Exit 1 when the completed result reaches this decision threshold.")
+
+    brief = subparsers.add_parser("brief", help="Create a pre-recommendation risk brief for Marketplace extensions.")
+    brief.add_argument("--marketplace", action="append", required=True, metavar="ID[@VERSION]", help="Exact Marketplace extension to assess; repeat to compare candidates.")
+    brief.add_argument("--purpose", required=True, help="The user need being evaluated, for example 'read and edit plist files'.")
+    brief.add_argument("--target-platform", help="Exact Marketplace artifact variant, for example darwin-x64.")
+    brief.add_argument("--profile", choices=("standard", "deep"), default="standard", help="Analysis boundary for every candidate.")
+    brief.add_argument("--registry-snapshot", metavar="REPORT.json", help="Replay registry and dependency intelligence captured in an earlier JSON report.")
+    brief.add_argument("--format", choices=("terminal", "json", "md"), default="terminal", help="Risk brief output format.")
+    brief.add_argument("--output", "--out", dest="output", help="Write JSON or Markdown to this path.")
+    brief.add_argument("--fail-on", choices=("review", "never"), default="review", help="Exit 1 when any candidate needs review or is blocked.")
 
     report = subparsers.add_parser("report", help="Open, verify, view, or export a saved report.")
     report_subparsers = report.add_subparsers(dest="report_command", required=True)
@@ -295,6 +308,38 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return _scan_exit_code(view, args.fail_on)
 
 
+def cmd_brief(args: argparse.Namespace) -> int:
+    purpose = str(args.purpose or "").strip()
+    if not purpose:
+        raise ValueError("--purpose must not be empty.")
+    if len(purpose) > 500:
+        raise ValueError("--purpose must be 500 characters or fewer.")
+    reports: list[dict[str, Any]] = []
+    for reference in args.marketplace:
+        extension_id, version = _marketplace_reference(str(reference))
+        print(color(f"Acquiring exact Marketplace artifact {extension_id}{f'@{version}' if version else ''}…", "brand_cyan"))
+        reports.append(run_with_profile(
+            args.profile,
+            lambda required_providers, extension_id=extension_id, version=version: scan_marketplace(
+                extension_id,
+                version=version,
+                target_platform=args.target_platform,
+                registry_snapshot=args.registry_snapshot,
+                required_providers=required_providers,
+            ),
+        ))
+    brief = build_risk_brief(reports, purpose=purpose, profile=args.profile)
+    if args.format == "terminal":
+        if args.output:
+            raise ValueError("Terminal output cannot be saved with --output; choose json or md.")
+        print(render_risk_brief(brief), end="")
+    else:
+        output = args.output or f"guardrails-risk-brief.{args.format}"
+        write_risk_brief(brief, output, format_name=args.format)
+        _print_export_result(output, args.format)
+    return brief_exit_code(brief, args.fail_on)
+
+
 def _select_installed(args: argparse.Namespace) -> list[dict[str, Any]]:
     rows = installed_extensions()
     if args.ide:
@@ -331,11 +376,14 @@ def _marketplace_target(args: argparse.Namespace) -> tuple[str, str | None]:
             raise ValueError("Marketplace search selection requires an interactive terminal; use --marketplace with an exact ID.")
         index = prompt_choice("Select extension", [str(item.get("extension_id") or "") for item in results], show_choices=False)
         return str(results[index].get("extension_id") or ""), args.version
-    value = str(args.marketplace or "")
+    return _marketplace_reference(str(args.marketplace or ""), version=args.version)
+
+
+def _marketplace_reference(value: str, *, version: str | None = None) -> tuple[str, str | None]:
     if "@" in value:
         extension_id, embedded_version = value.rsplit("@", 1)
-        return extension_id, args.version or embedded_version
-    return value, args.version
+        return extension_id, version or embedded_version
+    return value, version
 
 
 def cmd_report(args: argparse.Namespace) -> int:

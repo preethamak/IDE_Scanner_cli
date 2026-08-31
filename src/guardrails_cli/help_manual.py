@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-TOPICS = ("scan", "reports", "profiles", "automation", "shortcuts", "examples")
+TOPICS = ("scan", "brief", "reports", "profiles", "automation", "shortcuts", "examples")
 
 
 OVERVIEW = """# Guardrails Local Scan
@@ -19,6 +19,7 @@ Insiders without executing extension code.
 ## Command map
 
   scan       Scan installed extensions, a local package, or Marketplace artifact
+  brief      Create an agent-safe pre-recommendation brief for Marketplace candidates
   report     View, verify, or export an existing report
   rules      Browse or search the local detection-rule catalog
   metrics    Explain decisions, scores, evidence, and coverage
@@ -69,6 +70,39 @@ Other artifacts:
 
 Installed folders are copied into private temporary snapshots. Extension code is
 not executed. `--online` enables registry and dependency checks for local inputs.
+""",
+    "brief": """# Pre-recommendation risk briefs
+
+Use a brief before an agent recommends a Marketplace extension. Guardrails
+acquires each exact artifact, scans it without executing code, and emits an
+evidence gate for every candidate. A brief never installs an extension and
+does not claim that any result is safe.
+
+  guardrails brief --purpose "read and edit plist files" \\
+    --marketplace ivhernandez.vscode-plist \\
+    --marketplace mariano-g.plist-editor
+
+For an agent or a review system, use JSON:
+
+  guardrails brief --purpose "read plist files" \\
+    --marketplace publisher.extension@1.2.3 --format json --output brief.json
+
+Gate meanings:
+
+  eligible_for_recommendation  Completed analysis found no decision-level evidence.
+                               This is not proof that the artifact is safe.
+  needs_human_review           Context is required before a recommendation.
+  not_recommended              The scan found evidence supporting a block.
+  insufficient_evidence        Acquisition, identity, or required analysis is incomplete.
+
+Agents must not recommend or install a candidate that requires review, is not
+recommended, or has insufficient evidence. Reputation signals are context, not
+proof of safety.
+
+Each candidate also carries observed Marketplace installs/ratings/update date,
+GitHub repository activity/archive state, and the OSV dependency-advisory
+coverage status. These are transparent comparison signals, not a combined
+reputation score or an assurance that a release is safe.
 """,
     "reports": """# Reports
 
