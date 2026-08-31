@@ -99,6 +99,11 @@ Agents must not recommend or install a candidate that requires review, is not
 recommended, or has insufficient evidence. Reputation signals are context, not
 proof of safety.
 
+The JSON contract exposes `candidate.agent_handoff.recommendation_permitted`
+for the deterministic recommendation gate. Every brief returns
+`installation_permitted: false`; a separate user approval and organization
+policy are required before installation.
+
 Each candidate also carries observed Marketplace installs/ratings/update date,
 GitHub repository activity/archive state, and the OSV dependency-advisory
 coverage status. These are transparent comparison signals, not a combined

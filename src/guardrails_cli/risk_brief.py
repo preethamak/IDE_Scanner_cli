@@ -46,6 +46,11 @@ def build_risk_brief(
             "Cite the extension ID, version, artifact SHA-256, gate, and coverage when presenting a recommendation.",
         ],
         "comparison": _comparison(candidates),
+        "agent_handoff": {
+            "recommendation_permitted": len(candidates) == 1 and candidates[0]["agent_handoff"]["recommendation_permitted"],
+            "installation_permitted": False,
+            "instruction": "Use candidate.agent_handoff.recommendation_permitted as the recommendation gate. This brief never authorizes installation.",
+        },
         "candidates": candidates,
         "limitations": [
             "Static analysis can miss malicious behavior, delayed payloads, and future compromised updates.",
@@ -225,6 +230,18 @@ def _candidate(extension: dict[str, Any]) -> dict[str, Any]:
         "coverage_percent": coverage_percent,
         "coverage_status": coverage_status,
         "recommendation_gate": gate,
+        "agent_handoff": {
+            "recommendation_permitted": gate["status"] == "eligible_for_recommendation",
+            "installation_permitted": False,
+            "required_evidence": [
+                "extension_id",
+                "version",
+                "artifact.sha256",
+                "coverage_percent",
+                "recommendation_gate.status",
+                "recommendation_gate.reason",
+            ],
+        },
         "provenance": {
             "tier": str(provenance.get("tier") or "unknown"),
             "publisher_verified": bool(provenance.get("publisher_verified")),

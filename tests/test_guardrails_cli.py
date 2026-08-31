@@ -170,6 +170,12 @@ class GuardrailsCliTests(unittest.TestCase):
         self.assertEqual(payload["comparison"]["eligible_candidates"], ["sample.clean"])
         gates = {candidate["extension_id"]: candidate["recommendation_gate"]["status"] for candidate in payload["candidates"]}
         self.assertEqual(gates, {"sample.clean": "eligible_for_recommendation", "sample.review": "needs_human_review"})
+        handoffs = {candidate["extension_id"]: candidate["agent_handoff"] for candidate in payload["candidates"]}
+        self.assertEqual(handoffs["sample.clean"]["recommendation_permitted"], True)
+        self.assertEqual(handoffs["sample.review"]["recommendation_permitted"], False)
+        self.assertFalse(handoffs["sample.clean"]["installation_permitted"])
+        self.assertFalse(payload["agent_handoff"]["recommendation_permitted"])
+        self.assertFalse(payload["agent_handoff"]["installation_permitted"])
         self.assertIn("Do not recommend", payload["agent_policy"][0])
 
     def test_brief_never_treats_incomplete_analysis_as_recommendable(self) -> None:
