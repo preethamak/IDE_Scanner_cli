@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import zipfile
@@ -17,14 +18,20 @@ CANARY_FILES = (
     ".ssh/id_ed25519",
     ".aws/credentials",
 )
+MAX_RUNTIME_FILES = 100_000
+MAX_RUNTIME_BYTES = 2 * 1024 * 1024 * 1024
+MAX_RUNTIME_FILE_BYTES = 512 * 1024 * 1024
+MAX_RUNTIME_TIMEOUT_SECONDS = 300
 
 
 def run_sandbox(path: Path, allow_execute: bool = False, timeout_seconds: int = 15) -> dict[str, Any]:
-    if allow_execute:
-        raise ValueError(
-            "Executable sandbox mode is disabled until OS-level filesystem, process, and network isolation is available."
-        )
+    if not 1 <= timeout_seconds <= MAX_RUNTIME_TIMEOUT_SECONDS:
+        raise ValueError(f"Sandbox timeout must be between 1 and {MAX_RUNTIME_TIMEOUT_SECONDS} seconds")
     source = path.expanduser().resolve()
+    if allow_execute and shutil.which("bwrap") is None:
+        raise ValueError(
+            "Executable sandbox mode requires the Bubblewrap (bwrap) OS isolation backend; execution was refused."
+        )
     with tempfile.TemporaryDirectory(prefix="ide-scanner-sandbox-") as tmp:
         root = Path(tmp)
         target = _prepare_target(source, root / "target")
@@ -35,24 +42,51 @@ def run_sandbox(path: Path, allow_execute: bool = False, timeout_seconds: int = 
         trace_file = root / "trace.jsonl"
         hook_file = root / "node-runtime-hook.js"
         entrypoint_runner = root / "activate-entrypoint.js"
+        trace_file.touch()
         home.mkdir()
         workspace.mkdir()
         canaries = _write_canaries(home)
         _write_node_hook(hook_file, trace_file, home)
-        _write_entrypoint_runner(entrypoint_runner, target, manifest)
+        _write_entrypoint_runner(entrypoint_runner, manifest)
         observations: list[dict[str, Any]] = []
         plan = {
             "extension_id": extension_id,
             "source": str(source),
             "target": str(target),
             "allow_execute": allow_execute,
+            "backend": "bubblewrap" if allow_execute else "plan-only",
+            "isolation": {
+                "network": "disabled",
+                "filesystem": "copied-artifact-plus-synthetic-home-and-workspace",
+                "process": "isolated-pid-namespace",
+                "uid": 65534,
+            },
             "sandbox_home": str(home),
             "sandbox_workspace": str(workspace),
             "trace_file": str(trace_file),
             "instrumentation": {
                 "node_require_hook": str(hook_file),
                 "entrypoint_runner": str(entrypoint_runner),
-                "captures": ["fs", "child_process", "http", "https", "net", "dns"],
+                "captures": [
+                    "fs",
+                    "child_process",
+                    "http",
+                    "https",
+                    "net",
+                    "dns",
+                    "registered_commands",
+                    "webview_messages",
+                ],
+            },
+            "runtime_probes": {
+                "registered_commands": "invoke up to 50 handlers with a synthetic canary argument",
+                "webview_messages": "deliver one synthetic canary message to each registered handler",
+            },
+            "resource_limits": {
+                "max_files": MAX_RUNTIME_FILES,
+                "max_total_bytes": MAX_RUNTIME_BYTES,
+                "max_file_bytes": MAX_RUNTIME_FILE_BYTES,
+                "timeout_seconds_per_action": timeout_seconds,
             },
             "canary_files": canaries,
             "commands": _planned_commands(manifest),
@@ -66,6 +100,7 @@ def run_sandbox(path: Path, allow_execute: bool = False, timeout_seconds: int = 
                 timeout_seconds,
                 hook_file,
                 trace_file,
+                entrypoint_runner,
             ))
             observations.extend(_execute_entrypoint(
                 entrypoint_runner,
@@ -74,6 +109,7 @@ def run_sandbox(path: Path, allow_execute: bool = False, timeout_seconds: int = 
                 timeout_seconds,
                 hook_file,
                 trace_file,
+                target,
             ))
             observations.extend(_observations_from_trace(trace_file, canaries))
         return {
@@ -131,17 +167,21 @@ def _execute_planned_commands(
     timeout_seconds: int,
     hook_file: Path,
     trace_file: Path,
+    entrypoint_runner: Path,
 ) -> list[dict[str, Any]]:
     observations: list[dict[str, Any]] = []
-    env = _sandbox_env(home, workspace, hook_file, trace_file)
-    before = _snapshot(home, workspace)
+    before = _snapshot(home, workspace, target)
     for command in commands:
         try:
-            result = subprocess.run(
-                command["command"],
-                cwd=target,
-                env=env,
-                shell=True,
+            result = _run_isolated(
+                ["/bin/sh", "-lc", command["command"]],
+                target=target,
+                home=home,
+                workspace=workspace,
+                hook_file=hook_file,
+                trace_file=trace_file,
+                entrypoint_runner=entrypoint_runner,
+                cwd="/target",
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,
@@ -164,12 +204,12 @@ def _execute_planned_commands(
                 })
         except subprocess.TimeoutExpired:
             observations.append({
-                "kind": "unexpected_network",
+                "kind": "runtime_timeout",
                 "script": command["name"],
-                "destination": "unknown",
+                "phase": "lifecycle",
                 "evidence": f"script timed out after {timeout_seconds}s",
             })
-    after = _snapshot(home, workspace)
+    after = _snapshot(home, workspace, target)
     for path in sorted(after - before):
         observations.append({
             "kind": "filesystem_write",
@@ -185,13 +225,18 @@ def _execute_entrypoint(
     timeout_seconds: int,
     hook_file: Path,
     trace_file: Path,
+    target: Path,
 ) -> list[dict[str, Any]]:
-    env = _sandbox_env(home, workspace, hook_file, trace_file)
     try:
-        result = subprocess.run(
-            ["node", str(runner)],
-            cwd=workspace,
-            env=env,
+        result = _run_isolated(
+            ["node", "/runner/activate-entrypoint.js"],
+            target=target,
+            home=home,
+            workspace=workspace,
+            hook_file=hook_file,
+            trace_file=trace_file,
+            entrypoint_runner=runner,
+            cwd="/workspace",
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
@@ -218,10 +263,83 @@ def _execute_entrypoint(
         }]
     except subprocess.TimeoutExpired:
         return [{
-            "kind": "unexpected_network",
-            "destination": "unknown",
+            "kind": "runtime_timeout",
+            "phase": "activation",
             "evidence": f"entrypoint timed out after {timeout_seconds}s",
         }]
+
+
+def _run_isolated(
+    command: list[str],
+    *,
+    target: Path,
+    home: Path,
+    workspace: Path,
+    hook_file: Path,
+    trace_file: Path,
+    entrypoint_runner: Path,
+    cwd: str,
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    """Run an extension command in a fail-closed Bubblewrap namespace.
+
+    The host artifact is copied before this function is reached. Only the
+    copied artifact, synthetic home/workspace, the instrumentation files, and
+    read-only runtime libraries are mounted into the child namespace. Network
+    and the process namespace are isolated, and the child is mapped to nobody.
+    """
+    if shutil.which("bwrap") is None:
+        raise ValueError(
+            "Executable sandbox mode requires the Bubblewrap (bwrap) OS isolation backend; execution was refused."
+        )
+    args = [
+        "bwrap",
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-net",
+        "--unshare-pid",
+        "--unshare-uts",
+        "--unshare-ipc",
+        "--unshare-user",
+        "--uid", "65534",
+        "--gid", "65534",
+        "--cap-drop", "ALL",
+        "--ro-bind", "/usr", "/usr",
+        "--ro-bind", "/usr/local", "/usr/local",
+        "--ro-bind", "/bin", "/bin",
+        "--ro-bind", "/sbin", "/sbin",
+        "--ro-bind", "/lib", "/lib",
+        "--ro-bind", "/lib64", "/lib64",
+        "--ro-bind", "/etc", "/etc",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--tmpfs", "/tmp",
+        "--dir", "/home",
+        "--bind", str(home), "/home/guardrails",
+        "--dir", "/workspace",
+        "--bind", str(workspace), "/workspace",
+        "--dir", "/target",
+        "--bind", str(target), "/target",
+        "--dir", "/runner",
+        "--ro-bind", str(hook_file), "/runner/node-runtime-hook.js",
+        "--ro-bind", str(entrypoint_runner), "/runner/activate-entrypoint.js",
+        "--dir", "/trace",
+        "--bind", str(trace_file), "/trace/trace.jsonl",
+        "--clearenv",
+        "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "--setenv", "HOME", "/home/guardrails",
+        "--setenv", "USERPROFILE", "/home/guardrails",
+        "--setenv", "TMPDIR", "/tmp",
+        "--setenv", "IDE_SCANNER_SANDBOX", "1",
+        "--setenv", "IDE_SCANNER_CANARY", CANARY_VALUE,
+        "--setenv", "IDE_SCANNER_TRACE_FILE", "/trace/trace.jsonl",
+        "--setenv", "VSCODE_CWD", "/workspace",
+        "--setenv", "NODE_OPTIONS", "--require=/runner/node-runtime-hook.js",
+        "--chdir", cwd,
+        "--",
+        *command,
+    ]
+    return subprocess.run(args, **kwargs)
 
 
 def _sandbox_env(home: Path, workspace: Path, hook_file: Path, trace_file: Path) -> dict[str, str]:
@@ -263,6 +381,32 @@ function record(event) {
   } catch (_) {}
 }
 
+const commandHandlers = new Map();
+const webviewMessageHandlers = [];
+global.__guardrailsProbe = {
+  async run() {
+    let count = 0;
+    for (const [name, handler] of commandHandlers.entries()) {
+      if (count >= 50) break;
+      count += 1;
+      record({kind: 'command_probe', command: name});
+      try {
+        await Promise.resolve(handler({guardrailsCanary: process.env.IDE_SCANNER_CANARY}));
+      } catch (error) {
+        record({kind: 'command_probe_error', command: name, error: safeString(error && error.message ? error.message : error)});
+      }
+    }
+    for (const handler of webviewMessageHandlers) {
+      record({kind: 'webview_message_probe'});
+      try {
+        await Promise.resolve(handler({type: 'guardrails.canary', value: process.env.IDE_SCANNER_CANARY}));
+      } catch (error) {
+        record({kind: 'webview_message_probe_error', error: safeString(error && error.message ? error.message : error)});
+      }
+    }
+  },
+};
+
 function patchFunction(object, name, handler) {
   const original = object[name];
   if (typeof original !== 'function') return;
@@ -286,10 +430,14 @@ try {
   }
 } catch (_) {}
 
-function fakeRequest() {
+function fakeRequest(destination) {
   const events = {};
   return {
-    write() { return true; },
+    write(value) {
+      const text = safeString(value);
+      record({kind: 'network_write', target: destination || 'unknown', contains_canary: text.includes(process.env.IDE_SCANNER_CANARY || ''), bytes: text.length});
+      return true;
+    },
     end() { if (events.response) setImmediate(() => events.response({ statusCode: 204, on() {} })); return undefined; },
     on(name, handler) { events[name] = handler; return this; },
     once(name, handler) { events[name] = handler; return this; },
@@ -304,9 +452,10 @@ function patchNetwork(moduleName) {
     const mod = require(moduleName);
     for (const name of ['request', 'get']) {
       mod[name] = function(...args) {
-        record({kind: 'network', api: moduleName + '.' + name, target: safeString(args[0])});
+        const destination = safeString(args[0]);
+        record({kind: 'network', api: moduleName + '.' + name, target: destination});
         const callback = args.find((arg) => typeof arg === 'function');
-        const request = fakeRequest();
+        const request = fakeRequest(destination);
         if (callback) setImmediate(() => callback({ statusCode: 204, on() {} }));
         return request;
       };
@@ -318,8 +467,8 @@ patchNetwork('https');
 
 try {
   const net = require('net');
-  net.connect = function(...args) { record({kind: 'network', api: 'net.connect', target: safeString(args[0])}); return fakeRequest(); };
-  net.createConnection = function(...args) { record({kind: 'network', api: 'net.createConnection', target: safeString(args[0])}); return fakeRequest(); };
+  net.connect = function(...args) { const destination = safeString(args[0]); record({kind: 'network', api: 'net.connect', target: destination}); return fakeRequest(destination); };
+  net.createConnection = function(...args) { const destination = safeString(args[0]); record({kind: 'network', api: 'net.createConnection', target: destination}); return fakeRequest(destination); };
 } catch (_) {}
 
 try {
@@ -338,13 +487,40 @@ Module._load = function(request, parent, isMain) {
 function createVscodeStub() {
   const disposable = { dispose() {} };
   const noop = () => disposable;
+  const registerCommand = (name, handler) => {
+    const command = String(name || '');
+    record({kind: 'command_registered', command});
+    if (command && typeof handler === 'function') commandHandlers.set(command, handler);
+    return disposable;
+  };
+  const executeCommand = async (name, ...args) => {
+    const command = String(name || '');
+    record({kind: 'command_execute', command});
+    const handler = commandHandlers.get(command);
+    return handler ? handler(...args) : undefined;
+  };
+  const createWebviewPanel = () => {
+    record({kind: 'webview_created'});
+    return {
+      webview: {
+        html: '',
+        onDidReceiveMessage(handler) {
+          record({kind: 'webview_message_handler_registered'});
+          if (typeof handler === 'function') webviewMessageHandlers.push(handler);
+          return disposable;
+        },
+        postMessage: async () => true,
+      },
+      onDidDispose: noop,
+    };
+  };
   return {
-    commands: { registerCommand: noop, executeCommand: async () => undefined },
+    commands: { registerCommand, executeCommand },
     window: {
       showInformationMessage: async () => undefined,
       showWarningMessage: async () => undefined,
       showErrorMessage: async () => undefined,
-      createWebviewPanel: () => ({ webview: { html: '', onDidReceiveMessage: noop, postMessage: async () => true }, onDidDispose: noop })
+      createWebviewPanel,
     },
     workspace: {
       workspaceFolders: [{ uri: { fsPath: process.env.VSCODE_CWD || process.cwd() } }],
@@ -367,12 +543,12 @@ record({kind: 'instrumentation_started', home: sandboxHome});
     )
 
 
-def _write_entrypoint_runner(path: Path, target: Path, manifest: dict[str, Any]) -> None:
+def _write_entrypoint_runner(path: Path, manifest: dict[str, Any]) -> None:
     main = _extension_main(manifest)
     path.write_text(
         f"""
 const path = require('path');
-const target = {json.dumps(str(target))};
+const target = '/target';
 const mainFile = path.resolve(target, {json.dumps(main)});
 async function run() {{
   const mod = require(mainFile);
@@ -386,6 +562,9 @@ async function run() {{
   }};
   if (mod && typeof mod.activate === 'function') {{
     await Promise.resolve(mod.activate(context));
+  }}
+  if (global.__guardrailsProbe && typeof global.__guardrailsProbe.run === 'function') {{
+    await global.__guardrailsProbe.run();
   }}
 }}
 run().catch((err) => {{
@@ -403,8 +582,6 @@ def _observations_from_trace(trace_file: Path, canary_files: list[str]) -> list[
         return []
     canary_set = {str(Path(item)) for item in canary_files}
     observations: list[dict[str, Any]] = []
-    secret_read = False
-    network_seen = False
     for line in trace_file.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             event = json.loads(line)
@@ -414,19 +591,31 @@ def _observations_from_trace(trace_file: Path, canary_files: list[str]) -> list[
         if kind == "fs_read":
             path = str(event.get("path") or "")
             if path in canary_set or any(path.endswith(suffix) for suffix in ("/.env", "/.npmrc", "/.ssh/id_ed25519", "/.aws/credentials")):
-                secret_read = True
                 observations.append({
                     "kind": "secret_read",
                     "path": path,
                     "api": event.get("api"),
                 })
-        elif kind == "network":
-            network_seen = True
+        elif kind in {"network", "dns"}:
             observations.append({
-                "kind": "unexpected_network",
+                "kind": "network_attempt",
                 "destination": event.get("target") or event.get("api") or "unknown",
                 "api": event.get("api"),
             })
+        elif kind == "network_write":
+            contains_canary = bool(event.get("contains_canary"))
+            observations.append({
+                "kind": "runtime_network_write",
+                "contains_canary": contains_canary,
+                "bytes": event.get("bytes"),
+                "destination": event.get("target") or "unknown",
+            })
+            if contains_canary:
+                observations.append({
+                    "kind": "secret_exfil",
+                    "destination": event.get("target") or "unknown",
+                    "evidence": "runtime trace observed the canary value in a network request body",
+                })
         elif kind == "process_exec":
             command = str(event.get("command") or "")
             observations.append({
@@ -442,18 +631,32 @@ def _observations_from_trace(trace_file: Path, canary_files: list[str]) -> list[
                 })
         elif kind == "fs_write":
             path = str(event.get("path") or "")
+            observations.append({
+                "kind": "filesystem_write",
+                "path": path,
+                "api": event.get("api"),
+            })
             if any(marker in path.lower() for marker in (".bashrc", ".zshrc", ".profile", "launchagents", "startup", "systemd")):
                 observations.append({
                     "kind": "persistence",
                     "path": path,
                     "api": event.get("api"),
                 })
-    if secret_read and network_seen:
-        observations.append({
-            "kind": "secret_exfil",
-            "destination": "observed-network-after-canary-read",
-            "evidence": "runtime trace observed canary credential read and network activity in the same sandbox run",
-        })
+        elif kind in {
+            "command_registered",
+            "command_execute",
+            "command_probe",
+            "command_probe_error",
+            "webview_created",
+            "webview_message_handler_registered",
+            "webview_message_probe",
+            "webview_message_probe_error",
+        }:
+            observation = {"kind": f"runtime_{kind}"}
+            for key in ("command", "error"):
+                if key in event:
+                    observation[key] = event[key]
+            observations.append(observation)
     return _dedupe_observations(observations)
 
 
@@ -482,13 +685,24 @@ def _prepare_target(source: Path, destination: Path) -> Path:
     if source.is_file() and source.suffix.lower() == ".vsix":
         destination.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(source) as archive:
-            for member in archive.infolist():
+            members = archive.infolist()
+            if len(members) > MAX_RUNTIME_FILES:
+                raise ValueError(f"Sandbox archive exceeds the {MAX_RUNTIME_FILES}-file limit")
+            total_bytes = 0
+            for member in members:
                 name = member.filename.replace("\\", "/")
                 if not name or name.endswith("/"):
                     continue
+                if member.flag_bits & 0x1:
+                    raise ValueError("Sandbox refuses encrypted VSIX members")
+                if member.file_size < 0 or member.file_size > MAX_RUNTIME_FILE_BYTES:
+                    raise ValueError(f"Sandbox archive member exceeds the {MAX_RUNTIME_FILE_BYTES}-byte limit")
+                total_bytes += member.file_size
+                if total_bytes > MAX_RUNTIME_BYTES:
+                    raise ValueError(f"Sandbox archive exceeds the {MAX_RUNTIME_BYTES}-byte extraction limit")
                 target = (destination / name).resolve()
                 if destination.resolve() not in target.parents and target != destination.resolve():
-                    continue
+                    raise ValueError("Sandbox archive contains a path traversal member")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as src, target.open("wb") as dst:
                     while True:
@@ -502,4 +716,25 @@ def _prepare_target(source: Path, destination: Path) -> Path:
         for package_json in destination.rglob("package.json"):
             if "node_modules" not in package_json.parts:
                 return package_json.parent
-    return source
+    if source.is_dir():
+        _validate_source_tree(source)
+        shutil.copytree(source, destination, symlinks=True)
+        return destination
+    raise ValueError("Sandbox target must be an extension directory or VSIX file")
+
+
+def _validate_source_tree(source: Path) -> None:
+    file_count = 0
+    total_bytes = 0
+    for item in source.rglob("*"):
+        if item.is_symlink() or not item.is_file():
+            continue
+        file_count += 1
+        if file_count > MAX_RUNTIME_FILES:
+            raise ValueError(f"Sandbox artifact exceeds the {MAX_RUNTIME_FILES}-file limit")
+        size = item.stat().st_size
+        if size > MAX_RUNTIME_FILE_BYTES:
+            raise ValueError(f"Sandbox artifact file exceeds the {MAX_RUNTIME_FILE_BYTES}-byte limit")
+        total_bytes += size
+        if total_bytes > MAX_RUNTIME_BYTES:
+            raise ValueError(f"Sandbox artifact exceeds the {MAX_RUNTIME_BYTES}-byte limit")

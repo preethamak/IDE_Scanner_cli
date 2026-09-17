@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-TOPICS = ("scan", "brief", "reports", "profiles", "automation", "shortcuts", "examples")
+TOPICS = ("scan", "brief", "reports", "profiles", "policy", "automation", "shortcuts", "examples")
 
 
 OVERVIEW = """# Guardrails Local Scan
@@ -23,6 +23,7 @@ Insiders without executing extension code.
   report     View, verify, or export an existing report
   rules      Browse or search the local detection-rule catalog
   metrics    Explain decisions, scores, evidence, and coverage
+  policy     Check installations or published artifact hashes against an enterprise policy
   doctor     Check the scanner engine, analyzers, terminal, and IDE discovery
   help       Open this manual or a specific topic
   tui        Explicitly open the interactive Local Scan application
@@ -38,7 +39,7 @@ Insiders without executing extension code.
   rules show RULE_ID               Explain one detection rule
   metrics [TOPIC]                  Explain result terminology
   help [TOPIC]                     Read scan, reports, profiles, automation,
-                                   shortcuts, or examples
+                                   policy, shortcuts, or examples
 
 Run `guardrails COMMAND --help` for every flag accepted by a command.
 Run `guardrails help shortcuts` for interactive controls.
@@ -68,15 +69,22 @@ Other artifacts:
   guardrails scan --file ./unpacked-extension
   guardrails scan --marketplace publisher.extension@1.2.3
 
-Installed folders are copied into private temporary snapshots. Extension code is
-not executed. `--online` enables registry and dependency checks for local inputs.
+Deep Marketplace scans run the executable-capability portion of the artifact in
+a Bubblewrap namespace with networking disabled. Themes and other packages
+without executable capability are recorded as not applicable. Use `--runtime`
+to request this pass outside the deep profile.
+
+Installed folders are copied into private temporary snapshots. Local extension
+code is not executed by the default local scan. `--online` enables registry and
+dependency checks for local inputs.
 """,
     "brief": """# Pre-recommendation risk briefs
 
 Use a brief before an agent recommends a Marketplace extension. Guardrails
-acquires each exact artifact, scans it without executing code, and emits an
-evidence gate for every candidate. A brief never installs an extension and
-does not claim that any result is safe.
+acquires each exact artifact, scans it without installing anything, and emits
+an evidence gate for every candidate. Deep briefs also run the capability-gated
+runtime pass in Bubblewrap. A brief never installs an extension and does not
+claim that any result is safe.
 
   guardrails brief --purpose "read and edit plist files" \\
     --marketplace ivhernandez.vscode-plist \\
@@ -146,6 +154,25 @@ provider produces INCOMPLETE, never ALLOW.
   guardrails scan --all --profile standard --yes
   guardrails scan --file extension.vsix --profile offline
   guardrails scan --extension publisher.extension --profile deep
+""",
+    "policy": """# Enterprise policy checks
+
+GuardRails workspaces can export a deny-by-default enterprise policy bundle.
+The bundle contains exact approved extension versions and their published
+artifact SHA-256 values. The VS Code settings inside the bundle enforce the
+approved versions; the Guardrails CLI checks local installations against the
+same exact-release list.
+
+  guardrails policy check --bundle guardrails-enterprise-policy.json
+  guardrails policy check --bundle guardrails-enterprise-policy.json --ide cursor
+  guardrails policy check --bundle guardrails-enterprise-policy.json --format json
+  guardrails policy verify --bundle guardrails-enterprise-policy.json --artifact extension.vsix
+
+An installed extension directory can be checked for ID and version, but it is
+not the original Marketplace VSIX. Such an installation is reported as
+version-allowed but unverified, and the policy check is not compliant until
+`policy verify` hashes the published artifact. Unknown versions fail closed
+because the policy default is DENY.
 """,
     "automation": """# Automation
 

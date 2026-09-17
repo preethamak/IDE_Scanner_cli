@@ -4,8 +4,11 @@ import argparse
 import hmac
 import json
 import os
+import queue
 import re
+import sys
 import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +23,22 @@ from .scanner import scan_targets
 SERVICE_VERSION = "0.1.0"
 DEFAULT_DATA_DIR = Path(os.environ.get("IDE_SCANNER_DATA_DIR", ".ide-scanner-data"))
 MARKETPLACE_ID = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_.-]+$")
+
+
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, value))
+
+
+# Bounded worker pool + queue so a burst of scan requests cannot spawn
+# unbounded threads or downloads. Excess requests are rejected with 429 rather
+# than silently queued forever.
+MAX_SCAN_WORKERS = _bounded_env_int("IDE_SCANNER_MAX_WORKERS", 2, 1, 16)
+MAX_SCAN_QUEUE = _bounded_env_int("IDE_SCANNER_MAX_QUEUE", 32, 1, 1024)
+JOB_TIMEOUT_SECONDS = _bounded_env_int("IDE_SCANNER_JOB_TIMEOUT", 600, 30, 3600)
 
 
 class JobStore:
@@ -106,6 +125,8 @@ def execute_marketplace_job(
             online=True,
             include_posture=False,
             required_providers=DEEP_REQUIRED_PROVIDERS,
+            dynamic_runtime=True,
+            runtime_timeout_seconds=20,
         )
         bundle = build_report_bundle(report, profile="deep", source="marketplace")
         extension_rows = bundle.get("leaderboard", {}).get("extensions", [])
@@ -123,12 +144,108 @@ def execute_marketplace_job(
         store.write(job)
 
 
+class ScanWorkerPool:
+    """Fixed-size worker pool with a bounded queue and per-job timeout.
+
+    A burst of scan submissions is capped: at most ``max_workers`` scans run
+    concurrently, at most ``max_queue`` wait, and anything beyond that is
+    rejected so the process cannot be driven into unbounded thread/download
+    fan-out. Each job is watched by a timeout that marks it ``failed`` if it
+    overruns, so a wedged download or analyzer cannot occupy a worker forever."""
+
+    def __init__(
+        self,
+        store: JobStore,
+        max_workers: int = MAX_SCAN_WORKERS,
+        max_queue: int = MAX_SCAN_QUEUE,
+        job_timeout: int = JOB_TIMEOUT_SECONDS,
+        runner: Callable[[JobStore, dict[str, Any]], None] = execute_marketplace_job,
+    ) -> None:
+        self.store = store
+        self.job_timeout = job_timeout
+        self._runner = runner
+        self._queue: "queue.Queue[dict[str, Any] | None]" = queue.Queue(maxsize=max_queue)
+        self._threads: list[threading.Thread] = []
+        for index in range(max_workers):
+            thread = threading.Thread(target=self._worker, name=f"scan-worker-{index}", daemon=True)
+            thread.start()
+            self._threads.append(thread)
+
+    def submit(self, job: dict[str, Any]) -> bool:
+        try:
+            self._queue.put_nowait(job)
+            return True
+        except queue.Full:
+            return False
+
+    def _worker(self) -> None:
+        while True:
+            job = self._queue.get()
+            if job is None:
+                return
+            try:
+                self._run_with_timeout(job)
+            finally:
+                self._queue.task_done()
+
+    def _run_with_timeout(self, job: dict[str, Any]) -> None:
+        done = threading.Event()
+
+        def _invoke() -> None:
+            try:
+                self._runner(self.store, job)
+            finally:
+                done.set()
+
+        worker = threading.Thread(target=_invoke, name=f"scan-run-{job['id']}", daemon=True)
+        worker.start()
+        if not done.wait(self.job_timeout):
+            # The scan overran its budget. Record the timeout; the orphaned
+            # daemon thread cannot be force-killed in CPython, but the bounded
+            # pool prevents it from starving new work indefinitely.
+            job["status"] = "failed"
+            job["stage"] = "timeout"
+            job["error"] = f"Scan exceeded the {self.job_timeout}s job timeout and was abandoned."
+            self.store.write(job)
+
+
+def cleanup_stale_jobs(store: JobStore, max_age_seconds: int = 7 * 24 * 3600) -> int:
+    """Remove job/report files older than ``max_age_seconds`` and mark any
+    ``running``/``queued`` job left over from a previous process as failed, so
+    a restart does not leave jobs wedged in a non-terminal state forever."""
+    removed = 0
+    cutoff = time.time() - max_age_seconds
+    for directory in (store.jobs_dir, store.reports_dir):
+        for path in directory.glob("*.json"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                continue
+    for path in store.jobs_dir.glob("job_*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(job, dict) and job.get("status") in {"queued", "running"}:
+            job["status"] = "failed"
+            job["stage"] = "interrupted"
+            job["error"] = "Service restarted while the job was in progress."
+            store.write(job)
+    return removed
+
+
 class ScannerServiceHandler(BaseHTTPRequestHandler):
     server_version = "IDEScannerService/0.1"
 
     @property
     def store(self) -> JobStore:
         return self.server.job_store  # type: ignore[attr-defined]
+
+    @property
+    def pool(self) -> "ScanWorkerPool":
+        return self.server.scan_pool  # type: ignore[attr-defined]
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(204)
@@ -174,7 +291,13 @@ class ScannerServiceHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": "target_platform is invalid."})
             return
         job = self.store.create(extension_id, version=version, target_platform=target_platform)
-        threading.Thread(target=execute_marketplace_job, args=(self.store, job), daemon=True).start()
+        if not self.pool.submit(job):
+            job["status"] = "failed"
+            job["stage"] = "rejected"
+            job["error"] = "Scanner is at capacity; retry later."
+            self.store.write(job)
+            self._json(429, {"error": "Scanner is at capacity; retry later.", "job": job})
+            return
         self._json(202, job)
 
     def log_message(self, format: str, *args: object) -> None:
@@ -229,8 +352,24 @@ def health_payload() -> dict[str, Any]:
 
 
 def serve(host: str = "127.0.0.1", port: int = 8787, data_dir: Path = DEFAULT_DATA_DIR) -> None:
+    token = os.environ.get("IDE_SCANNER_API_TOKEN", "")
+    non_loopback = host not in {"127.0.0.1", "::1", "localhost"}
+    if non_loopback and not token:
+        if os.environ.get("IDE_SCANNER_ALLOW_INSECURE_BIND") != "1":
+            raise SystemExit(
+                f"Refusing to bind {host}:{port} without IDE_SCANNER_API_TOKEN. "
+                "Set a token, bind to 127.0.0.1, or explicitly set "
+                "IDE_SCANNER_ALLOW_INSECURE_BIND=1 for a trusted local network only."
+            )
+        print(
+            f"WARNING: binding {host}:{port} with no API token; scan endpoints are unauthenticated.",
+            file=sys.stderr,
+        )
+    store = JobStore(data_dir)
+    cleanup_stale_jobs(store)
     server = ThreadingHTTPServer((host, port), ScannerServiceHandler)
-    server.job_store = JobStore(data_dir)  # type: ignore[attr-defined]
+    server.job_store = store  # type: ignore[attr-defined]
+    server.scan_pool = ScanWorkerPool(store)  # type: ignore[attr-defined]
     server.serve_forever()
 
 

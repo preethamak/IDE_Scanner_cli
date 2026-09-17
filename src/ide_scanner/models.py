@@ -88,6 +88,9 @@ class ExtensionReport:
     analysis_coverage: dict[str, Any] = field(default_factory=dict)
     analysis_status: AnalysisStatus = "incomplete"
     baseline_diff: dict[str, Any] = field(default_factory=dict)
+    trust_tier: str = ""
+    trust_tier_label: str = ""
+    trust_tier_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -157,6 +160,9 @@ class ExtensionSummary:
     coverage_percent: int = 0
     analysis_status: AnalysisStatus = "incomplete"
     baseline_changed: bool = False
+    trust_tier: str = ""
+    trust_tier_label: str = ""
+    trust_tier_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -206,6 +212,9 @@ class ExtensionDetail:
     analysis_coverage: dict[str, Any] = field(default_factory=dict)
     analysis_status: AnalysisStatus = "incomplete"
     baseline_diff: dict[str, Any] = field(default_factory=dict)
+    trust_tier: str = ""
+    trust_tier_label: str = ""
+    trust_tier_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

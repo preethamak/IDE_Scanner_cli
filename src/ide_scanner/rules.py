@@ -33,7 +33,10 @@ CODE_RULES = [
     Rule("process-execution", "execution", "LOW", 0.54, "Extension can spawn local processes. Common for language servers and debuggers.", re.compile(r"(?:\b(?:child_process|cp)\s*\.\s*(?:exec|execSync|execFile|execFileSync|spawn|spawnSync)\s*\(|require\s*\(\s*['\"](?:node:)?child_process['\"]\s*\)\s*\.\s*(?:exec|execSync|execFile|execFileSync|spawn|spawnSync)\s*\(|\b(?:execSync|execFile|execFileSync|spawnSync)\s*\(|\bProcessBuilder\b|Runtime\.getRuntime\(\)\.exec)"), "process_execution"),
     Rule("network-access", "network", "LOW", 0.48, "Extension performs network requests. Not malicious by itself.", re.compile(r"\b(fetch\(|axios\.|https?\.request|XMLHttpRequest|WebSocket|request\.write|req\.write|OkHttpClient|HttpClient|URLConnection)"), "network"),
     Rule("filesystem-access", "filesystem", "LOW", 0.42, "Extension reads or writes local files. Expected for many developer tools.", re.compile(r"\b(fs\.(?:promises\.)?(readFile|readFileSync|writeFile|readdir|createReadStream|createWriteStream)|workspace\.fs|FileInputStream|FileOutputStream)"), "filesystem"),
-    Rule("dynamic-code-loading", "code", "MEDIUM", 0.66, "Extension uses dynamic code loading or evaluation.", re.compile(r"\b(eval\(|new Function\(|vm\.runIn|import\s*\(|URLClassLoader|ClassLoader\.defineClass)"), "dynamic_code"),
+    # Ordinary local `import()` is normal extension module loading, not code
+    # evaluation. Keep the rule for actual evaluators and remote module loads;
+    # separate behavior-chain rules still cover network/process combinations.
+    Rule("dynamic-code-loading", "code", "MEDIUM", 0.66, "Extension evaluates code or loads a remote module dynamically.", re.compile(r"\b(eval\(|new Function\(|vm\.runIn|import\s*\(\s*['\"]https?://|URLClassLoader|ClassLoader\.defineClass)"), "dynamic_code"),
     Rule("obfuscation", "code", "LOW", 0.46, "Extension contains obfuscation indicators.", re.compile(r"(atob\(|Buffer\.from\([^)]*,\s*['\"]base64['\"]|(?:\\x[0-9a-fA-F]{2}){4,}|[A-Za-z0-9+/]{220,}={0,2})"), "obfuscation"),
     Rule("destructive-file-pattern", "filesystem", "MEDIUM", 0.76, "Extension contains recursive or forceful destructive file operation patterns.", re.compile(r"\b(rm\s+-rf|rmSync\([^)]*recursive\s*:\s*true)\b"), "destructive_file_activity"),
 ]

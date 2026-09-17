@@ -10,6 +10,8 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from concurrent.futures import ProcessPoolExecutor
+from itertools import repeat
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,7 @@ from .classification_policy import (
     is_decision_relevant,
     is_review_relevant,
 )
+from .contracts import ScanRequest
 from .discovery import discover_from_path, discover_local_installations
 from .jsonc import loads_jsonc
 from .models import ExtensionReport, Finding
@@ -54,6 +57,7 @@ from .rule_registry import RULESET_VERSION
 from .posture import scan_posture, summarize_posture
 from .providers import run_static_providers
 from .providers.runtime import SEMGREP_MAX_TARGET_BYTES, run_bounded_process
+from .sandbox_runner import run_sandbox
 from .registry import (
     MarketplaceDownloadError,
     _degzip_if_needed,
@@ -103,7 +107,11 @@ SKIP_DIRS = {".git", ".hg", ".svn"}
 MAX_TEXT_BYTES = 64 * 1024 * 1024
 MAX_SOURCE_PREVIEW_BYTES = 200 * 1024
 MAX_SOURCE_PREVIEWS = 40
+# Multi-megabyte entrypoints are treated as generated for correlation and AST
+# budgeting even when pretty-printed. This keeps one vendor bundle from making
+# an inventory scan unbounded while raw-text and YARA coverage remain active.
 GENERATED_BLOB_BYTES = 10 * 1024 * 1024
+GENERATED_ENTRYPOINT_AST_MAX_BYTES = JS_AST_MAX_INPUT_BYTES
 # Generated webpack/esbuild output can be substantially smaller than 1 MiB.
 # Treat a long, nearly line-free JavaScript artifact as generated once it is
 # large enough that character proximity no longer represents source locality.
@@ -182,7 +190,7 @@ CAPABILITY_RULES = {
     "webview-csp-unsafe-directive",
 }
 DEPENDENCY_RULES = {"mutable-dependency-source", "unpinned-dependency", "vulnerable-npm-dependency"}
-PROVENANCE_RULES = {"marketplace-removed-package", "packed-artifact", "source-vsix-diff-unexplained", "binary-without-origin"}
+PROVENANCE_RULES = {"marketplace-removed-package", "packed-artifact", "binary-without-origin"}
 POSTURE_RULES = {
     "dangerous-github-workflow",
     "repo-binary-artifacts",
@@ -264,22 +272,61 @@ def scan_targets(
     previous_report_file: Path | str | None = None,
     include_posture: bool = True,
     required_providers: set[str] | frozenset[str] | None = None,
+    jobs: int = 1,
     marketplace_artifact_store: ArtifactStore | None = None,
     path_artifact_origin: str | None = None,
     artifact_url: str | None = None,
     artifact_sha256: str | None = None,
+    dynamic_runtime: bool = False,
+    runtime_timeout_seconds: int = 15,
+) -> dict[str, Any]:
+    if not 1 <= jobs <= 32:
+        raise ValueError("jobs must be between 1 and 32")
+    if not 1 <= runtime_timeout_seconds <= 300:
+        raise ValueError("runtime_timeout_seconds must be between 1 and 300")
+    request = ScanRequest.create(
+        paths=paths,
+        extension_ids=extension_ids,
+        marketplace_scan_ids=marketplace_scan_ids,
+        marketplace_version=marketplace_version,
+        marketplace_target_platform=marketplace_target_platform,
+        include_fixtures=include_fixtures,
+        all_local=all_local,
+        online=online,
+        known_bad_hashes_file=known_bad_hashes_file,
+        threat_feed_file=threat_feed_file,
+        extension_advisories_file=extension_advisories_file,
+        registry_snapshot_file=registry_snapshot_file,
+        sandbox_observations_file=sandbox_observations_file,
+        previous_report_file=previous_report_file,
+        path_artifact_origin=path_artifact_origin,
+        artifact_url=artifact_url,
+        artifact_sha256=artifact_sha256,
+        dynamic_runtime=dynamic_runtime,
+        runtime_timeout_seconds=runtime_timeout_seconds,
+        include_posture=include_posture,
+        required_providers=required_providers,
+    )
+    return _scan_request(request, jobs=jobs, marketplace_artifact_store=marketplace_artifact_store)
+
+
+def _scan_request(
+    request: ScanRequest,
+    *,
+    jobs: int = 1,
+    marketplace_artifact_store: ArtifactStore | None = None,
 ) -> dict[str, Any]:
     targets: list[dict[str, str]] = []
     root = Path.cwd()
 
-    if include_fixtures:
+    if request.include_fixtures:
         targets.extend(discover_from_path(root / "fixtures"))
-    if path_artifact_origin is not None and path_artifact_origin not in ARTIFACT_ORIGINS:
-        raise ValueError(f"Unsupported path artifact origin: {path_artifact_origin}")
-    for path in paths or []:
+    if request.path_artifact_origin is not None and request.path_artifact_origin not in ARTIFACT_ORIGINS:
+        raise ValueError(f"Unsupported path artifact origin: {request.path_artifact_origin}")
+    for path in request.paths:
         discovered = discover_from_path(path)
         for target in discovered:
-            origin = path_artifact_origin or (
+            origin = request.path_artifact_origin or (
                 "user_uploaded_vsix" if target.get("type") == "vsix" else "local_directory"
             )
             if target.get("type") == "vsix" and origin in {"installed_directory", "local_directory", "source_snapshot"}:
@@ -288,7 +335,7 @@ def scan_targets(
                 raise ValueError(f"Artifact origin {origin} requires a VSIX file")
             target["artifact_origin"] = origin
         targets.extend(discovered)
-    if all_local:
+    if request.all_local:
         installed = discover_local_installations()
         for target in installed:
             target["artifact_origin"] = "installed_directory"
@@ -298,34 +345,43 @@ def scan_targets(
     for target in targets:
         unique[target["path"]] = target
 
-    known_bad_hashes = _load_known_bad_hashes(known_bad_hashes_file)
-    extensions = [
-        _scan_discovered_target(target, known_bad_hashes)
-        for target in unique.values()
-    ]
-    extensions.extend(_registry_only_extension(extension_id) for extension_id in extension_ids or [])
-    extensions.extend(
-        scan_marketplace_extension(
+    known_bad_hashes = _load_known_bad_hashes(request.known_bad_hashes_file)
+    extensions = _scan_discovered_targets(list(unique.values()), known_bad_hashes, jobs=jobs)
+    extensions.extend(_registry_only_extension(extension_id) for extension_id in request.extension_ids)
+    runtime_bundle: dict[str, Any] = {
+        "schema_version": "0.1.0",
+        "mode": "executed",
+        "extensions": {},
+        "runs": [],
+        "required_extension_ids": [],
+    }
+    for identifier in request.marketplace_scan_ids:
+        extensions.append(scan_marketplace_extension(
             identifier,
-            version=marketplace_version,
-            target_platform=marketplace_target_platform,
+            version=request.marketplace_version,
+            target_platform=request.marketplace_target_platform,
             known_bad_hashes=known_bad_hashes,
             artifact_store=marketplace_artifact_store,
-        )
-        for identifier in marketplace_scan_ids or []
-    )
-    if artifact_url or artifact_sha256:
-        if not artifact_url or not artifact_sha256:
+            dynamic_runtime=request.dynamic_runtime,
+            runtime_timeout_seconds=request.runtime_timeout_seconds,
+            runtime_bundle=runtime_bundle if request.dynamic_runtime else None,
+        ))
+    _apply_threat_feed(extensions, _load_threat_feed(request.threat_feed_file))
+    advisory_bundle = _load_extension_advisories(request.extension_advisories_file)
+    if request.artifact_url or request.artifact_sha256:
+        if not request.artifact_url or not request.artifact_sha256:
             raise ValueError("artifact_url and artifact_sha256 must be provided together")
-        extensions.append(scan_remote_artifact(artifact_url, artifact_sha256, known_bad_hashes))
-    _apply_threat_feed(extensions, _load_threat_feed(threat_feed_file))
-    advisory_bundle = _load_extension_advisories(extension_advisories_file)
+        extensions.append(scan_remote_artifact(request.artifact_url, request.artifact_sha256, known_bad_hashes))
     _apply_extension_advisories(extensions, advisory_bundle)
-    _apply_sandbox_observations(extensions, _load_sandbox_observations(sandbox_observations_file))
+    sandbox_bundle = _load_sandbox_observation_bundle(request.sandbox_observations_file)
+    if request.dynamic_runtime:
+        sandbox_bundle = _merge_dynamic_runtime_bundle(sandbox_bundle, runtime_bundle)
+    _apply_sandbox_observations(extensions, sandbox_bundle["extensions"])
+    _apply_sandbox_provider(extensions, sandbox_bundle)
     registry = (
-        _load_registry_snapshot(registry_snapshot_file)
-        if registry_snapshot_file is not None
-        else _capture_registry_snapshot(enrich_registry(extensions, online=online), source="live")
+        _load_registry_snapshot(request.registry_snapshot_file)
+        if request.registry_snapshot_file is not None
+        else _capture_registry_snapshot(enrich_registry(extensions, online=request.online), source="live")
     )
     _apply_registry_findings(extensions, registry["findings"])
     dependency_errors = [
@@ -334,11 +390,7 @@ def scan_targets(
     ]
     registry_enabled = bool(registry.get("enabled"))
     registry_identity = registry.get("snapshot") if isinstance(registry.get("snapshot"), dict) else {}
-    requested_providers = {
-        str(item).strip().lower()
-        for item in (required_providers or set())
-        if str(item).strip()
-    }
+    requested_providers = request.required_providers
     for extension in extensions:
         acquisition_failure = str(extension.artifact_inventory.get("skipped_reason") or "") if extension.source == "marketplace-error" else ""
         providers = extension.analysis_coverage.setdefault("providers", {})
@@ -398,12 +450,13 @@ def scan_targets(
             "sha256": str(registry_identity.get("sha256") or ""),
             "payload": _registry_snapshot_payload(registry),
         },
+        "dynamic_sandbox": dict(sandbox_bundle["metadata"]),
     }
     return _build_report(
         extensions,
         registry,
-        _load_previous_report(previous_report_file),
-        include_posture=include_posture,
+        _load_previous_report(request.previous_report_file),
+        include_posture=request.include_posture,
         intelligence=intelligence,
     )
 
@@ -610,13 +663,21 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
                 })
             else:
                 analysis_coverage["provider_scopes"]["semgrep"]["eligible_files"].append(rel)
-            if is_entrypoint or not generated_blob:
+            ast_budget_allows_entrypoint = (
+                not is_entrypoint
+                or not generated_blob
+                or text_size <= GENERATED_ENTRYPOINT_AST_MAX_BYTES
+            )
+            if ast_budget_allows_entrypoint:
                 status = _add_ast_findings(extension_id, version, rel, text, findings, generated=generated_blob)
                 js_ast_statuses.append(status)
                 if status not in ("ok", "unparsed"):
                     js_ast_failed_paths.append(rel)
                 if is_entrypoint and status == "unparsed":
                     ast_unparsed_entrypoints.append(rel)
+            else:
+                js_ast_statuses.append("generated-resource-skipped")
+                js_ast_failed_paths.append(rel)
         if suffix in EXEC_TEXT_EXTS:
             analysis_coverage["analyzed_executable_files"].append(rel)
             if suffix in JS_AST_EXTS:
@@ -881,6 +942,28 @@ def _scan_discovered_target(target: dict[str, str], known_bad_hashes: dict[str, 
         return _local_error_extension(path, target.get("type", "vscode"), f"{type(exc).__name__}: {exc}")
 
 
+def _scan_discovered_targets(
+    targets: list[dict[str, str]],
+    known_bad_hashes: dict[str, dict[str, Any]],
+    *,
+    jobs: int,
+) -> list[ExtensionReport]:
+    """Scan local artifacts with deterministic, bounded parallelism."""
+    if not targets:
+        return []
+    if jobs <= 1 or len(targets) == 1:
+        return [_scan_discovered_target(target, known_bad_hashes) for target in targets]
+    with ProcessPoolExecutor(max_workers=min(jobs, len(targets))) as executor:
+        return list(
+            executor.map(
+                _scan_discovered_target,
+                targets,
+                repeat(known_bad_hashes),
+                chunksize=1,
+            )
+        )
+
+
 def _local_error_extension(path: Path, source: str, message: str) -> ExtensionReport:
     reason = f"Scan aborted for this artifact and was isolated: {message}"
     artifact_inventory = _empty_artifact_inventory()
@@ -921,17 +1004,49 @@ def _local_error_extension(path: Path, source: str, message: str) -> ExtensionRe
     )
 
 
+_DYNAMIC_RUNTIME_CAPABILITIES = frozenset({
+    "activation",
+    "agentic",
+    "credential_commands",
+    "credential_configuration",
+    "credential_input",
+    "dynamic_code",
+    "filesystem",
+    "ide_contributions",
+    "lifecycle_scripts",
+    "network",
+    "process_execution",
+})
+
+
+def _runtime_required_for_report(report: ExtensionReport) -> bool:
+    """Apply the runtime policy without treating themes as executable code."""
+    capability_ids = {
+        str(item.get("id") or "")
+        for item in report.capabilities
+        if isinstance(item, dict)
+    }
+    return bool(capability_ids & _DYNAMIC_RUNTIME_CAPABILITIES)
+
+
 def scan_marketplace_extension(
     identifier: str,
     version: str | None = None,
     target_platform: str | None = None,
     known_bad_hashes: dict[str, dict[str, Any]] | None = None,
     artifact_store: ArtifactStore | None = None,
+    dynamic_runtime: bool = False,
+    runtime_timeout_seconds: int = 15,
+    runtime_bundle: dict[str, Any] | None = None,
 ) -> ExtensionReport:
-    """Download a VSIX from the VS Marketplace gallery and run the normal
-    quarantine-extraction static scan on it (scan_vsix). This is a hosted,
-    static-only path: it must never invoke sandbox_runner.run_sandbox(...,
-    allow_execute=True) against attacker-controlled marketplace content."""
+    """Acquire an exact marketplace artifact and analyze it.
+
+    Static analysis is always performed. When ``dynamic_runtime`` is explicit,
+    executable-capability artifacts also receive a bounded Bubblewrap pass over
+    the preserved exact bytes. Themes and other non-executable packages are
+    recorded as policy-gated/not-applicable instead of being forced through a
+    meaningless default entrypoint.
+    """
     try:
         resolved_id = parse_marketplace_reference(identifier)
     except MarketplaceDownloadError as exc:
@@ -962,6 +1077,43 @@ def scan_marketplace_extension(
             )
             scan_path = stored.path
         report = scan_vsix(scan_path, known_bad_hashes=known_bad_hashes, artifact_origin="archive_artifact")
+        if dynamic_runtime and runtime_bundle is not None:
+            runtime_required = _runtime_required_for_report(report)
+            run_record: dict[str, Any] = {
+                "extension_id": report.extension_id,
+                "version": report.version,
+                "required": runtime_required,
+                "artifact_sha256": report.artifact_hash,
+                "status": "not-applicable" if not runtime_required else "failed",
+            }
+            if runtime_required:
+                runtime_bundle.setdefault("required_extension_ids", []).append(report.extension_id)
+                try:
+                    runtime = run_sandbox(
+                        scan_path,
+                        allow_execute=True,
+                        timeout_seconds=runtime_timeout_seconds,
+                    )
+                    observed = runtime.get("extensions", {}) if isinstance(runtime, dict) else {}
+                    items = observed.get(report.extension_id, []) if isinstance(observed, dict) else []
+                    if not isinstance(items, list):
+                        items = []
+                    runtime_bundle.setdefault("extensions", {})[report.extension_id] = [
+                        item for item in items if isinstance(item, dict)
+                    ]
+                    run_record.update({
+                        "status": "completed",
+                        "mode": runtime.get("mode") if isinstance(runtime, dict) else "executed",
+                        "observation_count": len(items),
+                    })
+                except Exception as exc:  # noqa: BLE001 - runtime failures become disclosed provider evidence
+                    runtime_bundle.setdefault("extensions", {})[report.extension_id] = [{
+                        "kind": "sandbox_error",
+                        "phase": "runtime",
+                        "evidence": str(exc)[:500],
+                    }]
+                    run_record["error"] = str(exc)[:500]
+            runtime_bundle.setdefault("runs", []).append(run_record)
     except ArtifactStoreError as exc:
         return _marketplace_error_extension(resolved_id, f"Downloaded VSIX could not be preserved: {exc}")
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
@@ -1629,6 +1781,7 @@ def _add_artifact_inventory_findings(
     all_paths = {str(entry.get("path")) for entry in artifact_inventory.get("_all_file_hashes", [])}
     packed_artifacts: list[dict[str, Any]] = []
     native_artifacts: list[dict[str, Any]] = []
+    native_without_origin: list[dict[str, Any]] = []
     for artifact in artifact_inventory["risky_artifacts"]:
         rel = str(artifact["path"])
         kind = str(artifact["kind"])
@@ -1636,21 +1789,38 @@ def _add_artifact_inventory_findings(
             native_artifacts.append(artifact)
             capabilities.setdefault("native_code", {"id": "native_code", "evidence": []})["evidence"].append(rel)
             if not _has_origin_evidence(path, rel, all_paths):
-                findings.append(_finding(
-                    extension_id,
-                    version,
-                    "binary-without-origin",
-                    "provenance",
-                    "MEDIUM",
-                    0.55,
-                    f"Native binary {rel} has no companion checksum or signature file and no documented provenance.",
-                    [rel],
-                    "Publish a checksum/signature alongside the binary or document its build origin in SECURITY.md/README.",
-                    {"sha256": artifact["sha256"]},
-                ))
+                native_without_origin.append(artifact)
         else:
             packed_artifacts.append(artifact)
             capabilities.setdefault("packed_artifacts", {"id": "packed_artifacts", "evidence": []})["evidence"].append(rel)
+
+    # Origin verification is not independent intelligence yet: the scanner
+    # cannot authenticate a package-controlled README, checksum, or signature
+    # against a vendor trust root. Keep the gap visible, but aggregate it into
+    # one bounded hardening note and never turn every bundled language-server
+    # binary into a separate review event.
+    if native_without_origin:
+        sample = native_without_origin[:20]
+        sample_paths = [str(a["path"]) for a in sample]
+        findings.append(_finding(
+            extension_id,
+            version,
+            "binary-without-origin",
+            "provenance",
+            "MEDIUM",
+            0.55,
+            (
+                f"{len(native_without_origin)} native artifact(s) lack independent origin verification."
+                f" Sample: {', '.join(sample_paths)}."
+            ),
+            sample_paths,
+            "Use a registry-backed signature or attestation when available; otherwise document the build origin and keep the artifact under release monitoring.",
+            {
+                "unverified_count": len(native_without_origin),
+                "sample_artifacts": _artifact_evidence(sample),
+                "verification_status": "not_independently_verified",
+            },
+        ))
 
     # Emit one aggregate finding per kind rather than one per file. A language
     # server that legitimately ships dozens of jars or native binaries would
@@ -2080,6 +2250,32 @@ def _add_code_findings(
             [rel],
             "Verify the download source, integrity checks, and execution purpose.",
         ))
+    if (
+        has_download
+        and _ARCHIVE_EXTRACT_RE.search(text)
+        and _DYNAMIC_MODULE_LOAD_RE.search(text)
+        and not has_integrity_verification
+        and not _is_generated_code_blob(rel, text)
+        and _features_nearby(text, [DOWNLOAD_RE, _ARCHIVE_EXTRACT_RE, _DYNAMIC_MODULE_LOAD_RE])
+    ):
+        findings.append(_finding(
+            extension_id,
+            version,
+            "supply-chain-dropper-chain",
+            "supply-chain",
+            "HIGH",
+            0.84,
+            "Code downloads remote content, extracts an archive, and dynamically loads code from a computed path without visible integrity verification.",
+            [rel],
+            "Require an immutable pinned source, checksum or signature verification, and a documented reason for loading downloaded code into the extension runtime.",
+            {
+                "evidence_class": "correlated",
+                "correlation": "same-file-semantic-chain",
+                "source": "remote-download",
+                "transform": "archive-extraction",
+                "sink": "dynamic-module-load",
+            },
+        ))
     _add_cross_extension_code_findings(
         extension_id,
         version,
@@ -2099,6 +2295,21 @@ def _add_code_findings(
 # enough to reject whole-bundle co-occurrence in minified files, loose enough to keep a
 # genuinely local capture->exfil sequence. Kept in sync with the _features_nearby budget.
 CREDENTIAL_FLOW_WINDOW = 1500
+
+# Supply-chain dropper chain legs. The archive leg requires an actual extraction
+# API, and the load leg requires either a computed (non-literal) require/import
+# argument or an explicit bundler-escape loader. Plain `require('literal')` must
+# not qualify: every CommonJS file contains it.
+_ARCHIVE_EXTRACT_RE = re.compile(
+    r"(?:\bextractAllTo(?:Async)?\s*\(|\bextractEntryTo\s*\(|\btar\.(?:x|extract)\b|"
+    r"\bunzipper\.\w+|\bdecompress\s*\(|\bzlib\.(?:gunzip|gunzipSync|inflate|inflateSync|brotliDecompress)\b|"
+    r"new\s+AdmZip\b|\bloadAsync\s*\()",
+)
+_DYNAMIC_MODULE_LOAD_RE = re.compile(
+    r"(?:\b__non_webpack_require__\s*\(|\bcreateRequire\s*\(|\bModule\._load\s*\(|\bprocess\.dlopen\s*\(|"
+    r"\brequire\s*\(\s*(?:path\.|`[^`]*\$\{|[A-Za-z_$][\w$]*\s*[+.\[])|"
+    r"\bimport\s*\(\s*(?:path\.|`[^`]*\$\{|[A-Za-z_$][\w$]*\s*[+.\[]))",
+)
 
 # Obfuscation signal for the obfuscation-execution-network chain. Requires a RUN of at
 # least four consecutive \xNN hex escapes (real string-obfuscation) or an explicit base64
@@ -2204,12 +2415,12 @@ def _add_cross_extension_code_findings(
     sensitive_input = _find_sensitive_api_text(text, r"showInputBox\s*\((?P<args>[^;\n]{0,800})", "InputBox")
     sensitive_config_reads = _find_sensitive_api_text(
         text,
-        r"(?:getConfiguration\s*\([^)]*\)\s*\.\s*get|WorkspaceConfiguration\s*\.\s*get|config\s*\.\s*get)\s*\((?P<args>[^;\n]{0,500})",
+        r"(?:getConfiguration\s*\([^)]{0,500}\)\s*\.\s*get|WorkspaceConfiguration\s*\.\s*get|config\s*\.\s*get)\s*\((?P<args>[^;\n]{0,500})",
         "WorkspaceConfiguration",
     )
     sensitive_config_updates = _find_sensitive_api_text(
         text,
-        r"(?:getConfiguration\s*\([^)]*\)\s*\.\s*update|WorkspaceConfiguration\s*\.\s*update|config\s*\.\s*update)\s*\((?P<args>[^;\n]{0,500})",
+        r"(?:getConfiguration\s*\([^)]{0,500}\)\s*\.\s*update|WorkspaceConfiguration\s*\.\s*update|config\s*\.\s*update)\s*\((?P<args>[^;\n]{0,500})",
         "WorkspaceConfiguration",
     )
     sensitive_global_state = _find_sensitive_api_text(
@@ -2416,7 +2627,7 @@ def _add_cross_extension_code_findings(
 
 def _find_sensitive_api_text(text: str, pattern: str, surface: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for match in re.finditer(pattern, text, re.I | re.S):
+    for match in re.finditer(pattern, text, re.I):
         snippet = _balanced_call_arguments(text, match.start("args")) if "args" in match.groupdict() else match.group(0)
         if not _looks_sensitive_text(snippet):
             continue
@@ -2848,15 +3059,34 @@ def _sandbox_observation_finding(extension: ExtensionReport, item: dict[str, Any
         "download_execute": ("observed-download-execute", "HIGH", 0.86, "Sandbox observed downloaded content being executed or loaded."),
         "persistence": ("observed-persistence", "HIGH", 0.84, "Sandbox observed persistence or autorun behavior."),
         "destructive": ("observed-destructive-behavior", "HIGH", 0.88, "Sandbox observed destructive file behavior."),
-        "unexpected_network": ("observed-unexpected-network", "MEDIUM", 0.68, "Sandbox observed network traffic to an unexpected destination."),
-        "process_exec": ("observed-process-exec", "MEDIUM", 0.66, "Sandbox observed process execution."),
-        "filesystem_write": ("observed-filesystem-write", "LOW", 0.58, "Sandbox observed filesystem writes."),
+        "network_attempt": ("runtime-network-attempt", "INFO", 0.35, "Sandbox observed an attempted network request; isolation prevented the request from completing."),
+        "unexpected_network": ("runtime-network-attempt", "INFO", 0.35, "Sandbox observed an attempted network request; isolation prevented the request from completing."),
+        "process_exec": ("runtime-process-execution", "INFO", 0.35, "Sandbox observed process execution; this confirms capability, not malicious intent."),
+        "filesystem_write": ("runtime-filesystem-write", "INFO", 0.3, "Sandbox observed a filesystem write; this confirms capability, not malicious intent."),
     }
-    if kind not in mapping:
+    if kind == "runtime_timeout":
+        rule_id, severity, confidence, summary = (
+            "sandbox-runtime-timeout",
+            "INFO",
+            0.4,
+            "Sandbox action timed out; runtime coverage is incomplete.",
+        )
+        evidence_class = "weak"
+    elif kind == "sandbox_error":
+        rule_id, severity, confidence, summary = (
+            "sandbox-runtime-error",
+            "INFO",
+            0.35,
+            "Sandbox runtime instrumentation could not complete; runtime coverage is incomplete.",
+        )
+        evidence_class = "weak"
+    elif kind in mapping:
+        rule_id, severity, confidence, summary = mapping[kind]
+        evidence_class = "weak" if kind in {"network_attempt", "unexpected_network", "process_exec", "filesystem_write"} else "observed"
+    else:
         return None
-    rule_id, severity, confidence, summary = mapping[kind]
     evidence = dict(item)
-    evidence["evidence_class"] = "observed"
+    evidence["evidence_class"] = evidence_class
     file_refs = [str(ref) for ref in item.get("file_refs", [])] if isinstance(item.get("file_refs"), list) else []
     return _finding(
         extension.extension_id,
@@ -2872,23 +3102,148 @@ def _sandbox_observation_finding(extension: ExtensionReport, item: dict[str, Any
     )
 
 
-def _load_sandbox_observations(path: Path | str | None = None) -> dict[str, list[dict[str, Any]]]:
+def _load_sandbox_observation_bundle(path: Path | str | None = None) -> dict[str, Any]:
     raw_path = str(path or os.environ.get("IDE_SCANNER_SANDBOX_OBSERVATIONS_FILE") or "")
     if not raw_path:
-        return {}
+        return {
+            "extensions": {},
+            "metadata": {
+                "status": "not-requested",
+                "mode": "static-only",
+                "executed": False,
+                "observation_count": 0,
+            },
+        }
     try:
         parsed = json.loads(Path(raw_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {}
-    if isinstance(parsed, dict) and isinstance(parsed.get("extensions"), dict):
-        parsed = parsed["extensions"]
-    if not isinstance(parsed, dict):
-        return {}
+        return {
+            "extensions": {},
+            "metadata": {
+                "status": "failed",
+                "mode": "external",
+                "executed": False,
+                "observation_count": 0,
+                "error": "sandbox observations file could not be read or parsed",
+            },
+        }
+    metadata_source = parsed if isinstance(parsed, dict) else {}
+    extension_payload = metadata_source.get("extensions") if isinstance(metadata_source.get("extensions"), dict) else parsed
+    if not isinstance(extension_payload, dict):
+        return {
+            "extensions": {},
+            "metadata": {
+                "status": "failed",
+                "mode": "external",
+                "executed": False,
+                "observation_count": 0,
+                "error": "sandbox observations payload has no extensions object",
+            },
+        }
     out: dict[str, list[dict[str, Any]]] = {}
-    for extension_id, items in parsed.items():
+    for extension_id, items in extension_payload.items():
         if isinstance(extension_id, str) and isinstance(items, list):
             out[extension_id] = [item for item in items if isinstance(item, dict)]
-    return out
+    mode = str(metadata_source.get("mode") or "external")
+    if mode == "executed":
+        status = "executed"
+        execution = "controlled-bubblewrap"
+    elif mode == "plan-only":
+        status = "planned"
+        execution = "not-run"
+    else:
+        status = "imported"
+        execution = "external"
+    plan = metadata_source.get("plan") if isinstance(metadata_source.get("plan"), dict) else {}
+    instrumentation = plan.get("instrumentation") if isinstance(plan.get("instrumentation"), dict) else {}
+    metadata: dict[str, Any] = {
+        "status": status,
+        "mode": mode,
+        "execution": execution,
+        "executed": mode == "executed",
+        "schema_version": str(metadata_source.get("schema_version") or "unknown"),
+        "backend": str(plan.get("backend") or "external"),
+        "observation_count": sum(len(items) for items in out.values()),
+    }
+    if isinstance(plan.get("resource_limits"), dict):
+        metadata["resource_limits"] = dict(plan["resource_limits"])
+    if isinstance(plan.get("runtime_probes"), dict):
+        metadata["runtime_probes"] = dict(plan["runtime_probes"])
+    if isinstance(instrumentation.get("captures"), list):
+        metadata["captures"] = [str(item) for item in instrumentation["captures"]]
+    return {"extensions": out, "metadata": metadata}
+
+
+def _load_sandbox_observations(path: Path | str | None = None) -> dict[str, list[dict[str, Any]]]:
+    """Backward-compatible access to the extension observation map."""
+    bundle = _load_sandbox_observation_bundle(path)
+    return bundle["extensions"]
+
+
+def _merge_dynamic_runtime_bundle(
+    sandbox_bundle: dict[str, Any],
+    runtime_bundle: dict[str, Any],
+) -> dict[str, Any]:
+    """Combine explicit external evidence with the in-process runtime pass."""
+    merged_extensions = {
+        key: list(value)
+        for key, value in (sandbox_bundle.get("extensions") or {}).items()
+        if isinstance(key, str) and isinstance(value, list)
+    }
+    for key, value in (runtime_bundle.get("extensions") or {}).items():
+        if isinstance(key, str) and isinstance(value, list):
+            merged_extensions.setdefault(key, []).extend(item for item in value if isinstance(item, dict))
+    base_metadata = sandbox_bundle.get("metadata") if isinstance(sandbox_bundle.get("metadata"), dict) else {}
+    runs = runtime_bundle.get("runs") if isinstance(runtime_bundle.get("runs"), list) else []
+    required_ids = runtime_bundle.get("required_extension_ids") if isinstance(runtime_bundle.get("required_extension_ids"), list) else []
+    metadata = dict(base_metadata)
+    metadata.update({
+        "status": "executed",
+        "mode": "executed",
+        "execution": "controlled-bubblewrap",
+        "executed": True,
+        "backend": "bubblewrap",
+        "runtime_policy": "capability-gated-v1",
+        "runtime_runs": runs,
+        "runtime_required_ids": sorted({str(item) for item in required_ids if str(item)}),
+        "observation_count": sum(len(value) for value in merged_extensions.values()),
+    })
+    return {"extensions": merged_extensions, "metadata": metadata}
+
+
+def _apply_sandbox_provider(extensions: list[ExtensionReport], bundle: dict[str, Any]) -> None:
+    metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
+    observations = bundle.get("extensions") if isinstance(bundle.get("extensions"), dict) else {}
+    status = str(metadata.get("status") or "not-requested")
+    required_ids = {str(item).lower() for item in metadata.get("runtime_required_ids", []) if str(item)}
+    for extension in extensions:
+        items = observations.get(extension.extension_id, [])
+        required = extension.extension_id.lower() in required_ids
+        provider_status = status
+        execution = str(metadata.get("execution") or "not-run")
+        executed = bool(metadata.get("executed"))
+        if metadata.get("runtime_policy") == "capability-gated-v1" and not required:
+            provider_status = "not-applicable"
+            execution = "policy-gated"
+            executed = False
+        error_count = sum(
+            1 for item in items
+            if isinstance(item, dict) and str(item.get("kind") or "") in {"runtime_timeout", "sandbox_error"}
+        ) if isinstance(items, list) else 0
+        if required and error_count:
+            provider_status = "failed"
+        provider = {
+            "provider": "dynamic_sandbox",
+            "status": provider_status,
+            "mode": str(metadata.get("mode") or "static-only"),
+            "execution": execution,
+            "executed": executed,
+            "observation_count": len(items) if isinstance(items, list) else 0,
+            "error_count": error_count,
+            "required": required,
+            "policy": str(metadata.get("runtime_policy") or "external-evidence"),
+        }
+        extension.analysis_coverage.setdefault("providers", {})["dynamic_sandbox"] = provider
 
 
 def _build_report(
@@ -2907,11 +3262,15 @@ def _build_report(
     by_verdict: dict[str, int] = {}
     by_severity: dict[str, int] = {}
     by_decision: dict[str, int] = {}
+    by_analysis_status: dict[str, int] = {}
     max_score = 0
     max_malware_score = 0
     max_risk_score = 0
     for extension in extensions:
-        by_verdict[extension.verdict] = by_verdict.get(extension.verdict, 0) + 1
+        analysis_status = str(extension.analysis_status or "incomplete")
+        by_analysis_status[analysis_status] = by_analysis_status.get(analysis_status, 0) + 1
+        if analysis_status == "complete" and extension.decision != "incomplete":
+            by_verdict[extension.verdict] = by_verdict.get(extension.verdict, 0) + 1
         by_severity[extension.severity] = by_severity.get(extension.severity, 0) + 1
         by_decision[extension.decision] = by_decision.get(extension.decision, 0) + 1
         max_malware_score = max(max_malware_score, extension.malware_score)
@@ -2930,6 +3289,7 @@ def _build_report(
         "by_verdict": by_verdict,
         "by_severity": by_severity,
         "by_decision": by_decision,
+        "by_analysis_status": by_analysis_status,
         "max_score": max_score,
         "max_malware_score": max_malware_score,
         "max_risk_score": max_risk_score,
@@ -2943,7 +3303,11 @@ def _build_report(
         "scanner_build": os.environ.get("IDE_SCANNER_BUILD_SHA", "").strip() or "unknown",
         "ruleset_version": RULESET_VERSION,
         "policy_version": POLICY_VERSION,
-        "privacy_mode": "local-metadata-and-static-features",
+        "privacy_mode": (
+            "local-metadata-static-features-plus-controlled-runtime"
+            if str((intelligence or {}).get("dynamic_sandbox", {}).get("status") or "") in {"executed", "imported"}
+            else "local-metadata-and-static-features"
+        ),
         "registry_checks": registry,
         "intelligence": dict(intelligence or {}),
         "summary": summary,
@@ -2981,12 +3345,14 @@ def _human_summary(
     posture_summary: dict[str, Any] | None = None,
 ) -> list[str]:
     by_verdict = summary.get("by_verdict", {})
+    by_analysis_status = summary.get("by_analysis_status", {})
     notes = [
         f"Scanned {summary.get('total_extensions', 0)} extension(s): "
         f"{by_verdict.get('malicious', 0)} malicious, "
         f"{by_verdict.get('suspicious', 0)} suspicious, "
         f"{by_verdict.get('review', 0)} review, "
-        f"{by_verdict.get('clean', 0)} clean."
+        f"{by_verdict.get('clean', 0)} clean, "
+        f"{sum(count for status, count in by_analysis_status.items() if status != 'complete')} incomplete."
     ]
     if registry.get("enabled"):
         notes.append(
@@ -3843,6 +4209,7 @@ def _javascript_ast_provider_status(statuses: list[str], failed_paths: list[str]
         "max_timeout_attempts": JS_AST_TIMEOUT_ATTEMPTS,
         "max_old_space_mb": JS_AST_MAX_OLD_SPACE_MB,
         "max_input_bytes_per_file": JS_AST_MAX_INPUT_BYTES,
+        "generated_entrypoint_max_bytes": GENERATED_ENTRYPOINT_AST_MAX_BYTES,
     }
     if not statuses:
         # No JS/TS files were reachable; nothing for this provider to do.
@@ -3863,10 +4230,16 @@ def _javascript_ast_provider_status(statuses: list[str], failed_paths: list[str]
             record["failed_paths"] = sorted(set(failed_paths))
         if "node-missing" in reasons:
             record["error"] = "Node runtime unavailable; JavaScript AST analysis did not run."
+        elif "generated-resource-skipped" in reasons:
+            record["error"] = (
+                "AST analysis skipped generated entrypoints beyond the "
+                f"{GENERATED_ENTRYPOINT_AST_MAX_BYTES:,}-byte generated-code budget; "
+                "bounded raw-text and YARA analysis still ran."
+            )
         elif "resource-skipped" in reasons:
             record["error"] = (
-                "AST analysis skipped one or more files larger than the "
-                f"{JS_AST_MAX_INPUT_BYTES:,}-byte per-file memory-safety limit."
+                f"AST analysis skipped files beyond the {JS_AST_MAX_INPUT_BYTES:,}-byte "
+                "per-file memory-safety limit; bounded raw-text and YARA analysis still ran."
             )
     elif unparsed:
         record["status"] = "completed"
@@ -3931,6 +4304,7 @@ def _add_ast_findings(
     or a parse failure on a real entrypoint is never silently reported as
     complete."""
     items, status = analyze_js_source_status(rel, text)
+    dynamic_call_targets: list[dict[str, Any]] = []
     for item in items:
         rule_id = str(item.get("rule") or "")
         if not rule_id:
@@ -3943,6 +4317,9 @@ def _add_ast_findings(
         # string-concat/fromCharCode) is a genuine obfuscation signal even in
         # minified code, so it is retained.
         if generated and rule_id in _GENERATED_NOISE_AST_RULES:
+            continue
+        if rule_id == "ast-dynamic-call-target":
+            dynamic_call_targets.append(item)
             continue
         severity = str(item.get("severity") or "MEDIUM")
         if severity not in _SEVERITY_TO_CONFIDENCE:
@@ -3961,6 +4338,33 @@ def _add_ast_findings(
             [rel],
             "Confirm whether the dynamically constructed target/argument is attacker-influenceable; this evades plain-text regex detection by design.",
             evidence={"line": line} if isinstance(line, int) else None,
+        ))
+    if dynamic_call_targets:
+        severity_order = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+        representative = max(
+            dynamic_call_targets,
+            key=lambda item: severity_order.get(str(item.get("severity") or "MEDIUM"), 2),
+        )
+        severity = str(representative.get("severity") or "MEDIUM")
+        if severity not in _SEVERITY_TO_CONFIDENCE:
+            severity = "MEDIUM"
+        line = representative.get("line")
+        examples = [str(item.get("detail") or "computed call target") for item in dynamic_call_targets[:3]]
+        summary = (
+            f"AST found {len(dynamic_call_targets)} computed call target(s) in {rel}; "
+            f"representative examples: {'; '.join(examples)}"
+        )
+        findings.append(_finding(
+            extension_id,
+            version,
+            "ast-dynamic-call-target",
+            "code",
+            severity,
+            _SEVERITY_TO_CONFIDENCE[severity],
+            summary,
+            [rel],
+            "Treat computed dispatch as contextual only unless a separate rule resolves the target to a sensitive sink or establishes attacker control.",
+            evidence={"line": line, "count": len(dynamic_call_targets)} if isinstance(line, int) else {"count": len(dynamic_call_targets)},
         ))
     return status
 

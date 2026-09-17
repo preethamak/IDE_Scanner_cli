@@ -80,8 +80,56 @@ def evaluate_production_corpus(corpus_path: Path | str, report_path: Path | str)
             "thresholds": thresholds,
         },
         "summary": summary,
+        "verdict_confusion": _verdict_confusion(rows),
+        "rule_matrix": _rule_matrix(corpus["artifacts"], rows),
         "artifacts": rows,
     }
+
+
+def _verdict_confusion(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    matrix: dict[str, dict[str, int]] = {}
+    for row in rows:
+        label = str(row["label"])
+        verdict = str(row["actual"].get("verdict") or "not_scanned") if row["scanned"] else "not_scanned"
+        matrix.setdefault(label, {})
+        matrix[label][verdict] = matrix[label].get(verdict, 0) + 1
+    return {label: dict(sorted(cells.items())) for label, cells in sorted(matrix.items())}
+
+
+def _rule_matrix(artifacts: list[dict[str, Any]], rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Per-rule fire counts by corpus label plus required-rule recall.
+
+    A rule firing on known_safe artifacts is the corpus-level false-positive
+    signal used to demote noisy rules; required-rule misses on known_malicious
+    artifacts are the recall signal."""
+    required_by_identity = {
+        (_normalized_id(item.get("extension_id")), str(item.get("version") or "unknown")):
+            set((item.get("expected") or {}).get("required_rule_ids") or [])
+        for item in artifacts
+    }
+    matrix: dict[str, dict[str, Any]] = {}
+
+    def cell(rule_id: str) -> dict[str, Any]:
+        return matrix.setdefault(rule_id, {
+            "fired_on_known_safe": 0,
+            "fired_on_gray": 0,
+            "fired_on_known_malicious": 0,
+            "required_hits": 0,
+            "required_misses": 0,
+        })
+
+    for row in rows:
+        if not row["scanned"]:
+            continue
+        label = str(row["label"])
+        fired = set(row["actual"].get("rule_ids") or [])
+        for rule_id in fired:
+            cell(rule_id)[f"fired_on_{label}"] += 1
+        required = required_by_identity.get((_normalized_id(row["extension_id"]), str(row["version"])), set())
+        for rule_id in required:
+            key = "required_hits" if rule_id in fired else "required_misses"
+            cell(rule_id)[key] += 1
+    return dict(sorted(matrix.items()))
 
 
 def _validate_artifact(artifact: Any, index: int, seen: set[tuple[str, str, str]]) -> None:

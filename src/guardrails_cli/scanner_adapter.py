@@ -102,6 +102,8 @@ def scan_marketplace(
     target_platform: str | None = None,
     registry_snapshot: str | Path | None = None,
     required_providers: set[str] | frozenset[str] | None = None,
+    dynamic_runtime: bool = False,
+    runtime_timeout_seconds: int = 20,
 ) -> dict[str, Any]:
     verify_engine_integrity()
     return _run_engine_scan(
@@ -113,6 +115,8 @@ def scan_marketplace(
             registry_snapshot_file=registry_snapshot,
             include_posture=False,
             required_providers=required_providers,
+            dynamic_runtime=dynamic_runtime,
+            runtime_timeout_seconds=runtime_timeout_seconds,
         )
     )
 

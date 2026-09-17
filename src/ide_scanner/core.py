@@ -30,6 +30,8 @@ class ScanRequest:
     path_artifact_origin: str | None = None
     artifact_url: str | None = None
     artifact_sha256: str | None = None
+    dynamic_runtime: bool = False
+    runtime_timeout_seconds: int = 15
 
 
 def build_inventory(paths: list[Path | str] | None = None, all_local: bool = False) -> dict[str, Any]:
@@ -70,6 +72,8 @@ def run_scan(request: ScanRequest) -> dict[str, Any]:
         path_artifact_origin=request.path_artifact_origin,
         artifact_url=request.artifact_url,
         artifact_sha256=request.artifact_sha256,
+        dynamic_runtime=request.dynamic_runtime,
+        runtime_timeout_seconds=request.runtime_timeout_seconds,
     )
 
 

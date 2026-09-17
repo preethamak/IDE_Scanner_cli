@@ -26,6 +26,10 @@ _LOW_EXPOSURE_RULES = {
     # abuse path requiring approval review.
     "credential-config-update",
     "credential-global-state-storage",
+    # Character proximity is a triage hint, not a source-to-sink proof. Keep
+    # it visible as a hardening note; the correlated dataflow rule remains
+    # review-worthy when the scanner establishes a real flow.
+    "credential-source-near-network",
 }
 
 _LOW_CAPABILITY_RULES = {
@@ -76,10 +80,12 @@ def finding_actionability(finding: Any) -> FindingActionability:
             return "contextual"
         if rule_id in _LOW_PROVENANCE_RULES:
             return "low"
-        # An executable binary without attributable origin requires a human,
-        # but it is a low-severity provenance gap rather than suspicious code.
+        # A package-controlled origin claim is not independent verification,
+        # but absence of that verification is still a governance gap—not
+        # evidence that a native binary is malicious. Keep it visible without
+        # forcing every legitimate language server into manual review.
         if rule_id == "binary-without-origin":
-            return "review"
+            return "low"
         return "review"
     if evidence_class == "posture":
         return "review" if rule_id in _REVIEW_POSTURE_RULES else "low"

@@ -19,6 +19,7 @@ from .environment import doctor_checks
 from .help_manual import TOPICS, manual
 from .report_reader import read_report, report_view, validate_report
 from .risk_brief import brief_exit_code, build_risk_brief, render_risk_brief, write_risk_brief
+from .policy import check_installed_extensions, load_policy_bundle, verify_artifact
 from .scan_service import run_with_profile, scan_installed
 from .scanner_adapter import (
     discover_paths,
@@ -68,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_doctor(args)
         if args.command == "inventory":
             return cmd_inventory(args)
+        if args.command == "policy":
+            return cmd_policy(args)
         if args.command == "help":
             return cmd_help(args)
         if args.command == "tui":
@@ -108,6 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--select", help="Select displayed rows, for example 1,3-5 or all.")
     scan.add_argument("--version", help="Exact Marketplace version; may also be supplied as ID@VERSION.")
     scan.add_argument("--target-platform", help="Exact Marketplace artifact variant, for example darwin-x64.")
+    scan.add_argument("--runtime", action="store_true", help="Run a capability-gated dynamic pass for Marketplace artifacts inside Bubblewrap; non-executable packages are recorded as not applicable.")
+    scan.add_argument("--runtime-timeout", type=int, default=20, help="Maximum seconds per controlled runtime action (1-300).")
     scan.add_argument(
         "--profile",
         choices=("offline", "standard", "deep"),
@@ -157,6 +162,16 @@ def build_parser() -> argparse.ArgumentParser:
     inventory.add_argument("--output", "--out", dest="output", required=True, help="Write workspace-compatible JSON to this path.")
     inventory.add_argument("--device-id", help="Stable non-secret device identifier. Defaults to a local machine and IDE fingerprint.")
     inventory.add_argument("--device-name", help="Human-readable device label. Defaults to the IDE and operating system.")
+    policy = subparsers.add_parser("policy", help="Check installed extensions against an enterprise GuardRails policy bundle.")
+    policy_subparsers = policy.add_subparsers(dest="policy_command", required=True)
+    policy_check = policy_subparsers.add_parser("check", help="Check installed extension IDs and versions against a deny-by-default bundle.")
+    policy_check.add_argument("--bundle", required=True, help="GuardRails enterprise policy JSON exported from the workspace.")
+    policy_check.add_argument("--ide", choices=IDE_CHOICES, help="Limit the check to one IDE client.")
+    policy_check.add_argument("--format", choices=("terminal", "json"), default="terminal", help="Output format.")
+    policy_verify = policy_subparsers.add_parser("verify", help="Verify a published VSIX byte hash against the exact-release policy.")
+    policy_verify.add_argument("--bundle", required=True, help="GuardRails enterprise policy JSON exported from the workspace.")
+    policy_verify.add_argument("--artifact", required=True, help="Path to the published VSIX or other exact artifact file.")
+    policy_verify.add_argument("--format", choices=("terminal", "json"), default="terminal", help="Output format.")
     help_command = subparsers.add_parser("help", help="Read the Guardrails command and workflow manual.")
     help_command.add_argument("topic", nargs="?", choices=TOPICS)
     subparsers.add_parser("tui", help="Open the interactive Local Scan terminal application.")
@@ -200,6 +215,49 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_policy(args: argparse.Namespace) -> int:
+    if args.policy_command not in {"check", "verify"}:
+        raise ValueError("A policy command is required.")
+    bundle = load_policy_bundle(args.bundle)
+    if args.policy_command == "verify":
+        result = verify_artifact(bundle, args.artifact)
+        if args.format == "json":
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(section("GuardRails artifact policy"))
+            print(f"Status: {result['status'].upper()}")
+            print(f"Artifact: {result['artifact']}")
+            print(f"SHA-256: {result['artifact_sha256']}")
+            matched = result["matched_releases"]
+            if matched:
+                print("Matched release(s): " + ", ".join(f"{item['extension_id']}@{item['version']}" for item in matched))
+            print(result["reason"])
+        return 0 if result["status"] == "allowed" else 1
+    installations = installed_extensions()
+    if args.ide:
+        installations = [row for row in installations if _ide_key(str(row.get("client") or "")) == args.ide]
+    result = check_installed_extensions(bundle, installations)
+    if args.format == "json":
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        summary = result["summary"]
+        print(section("GuardRails enterprise policy"))
+        print(f"Policy: {result['policy_hash'] or 'unidentified'}")
+        print("Default action: DENY")
+        print(f"Installed: {summary['installed']}  Version-allowed: {summary['allowed']}  Unverified: {summary['unverified']}  Blocked: {summary['blocked']}")
+        if result["results"]:
+            rows = [[item["status"].upper(), item["extension_id"], item["version"], item["client"]] for item in result["results"]]
+            print(table(["Status", "Extension", "Version", "IDE"], rows, max_widths=[10, 42, 18, 14]))
+            explicit = [
+                item for item in result["results"]
+                if item.get("capability_contract", {}).get("requires_explicit_review") is True
+            ]
+            if explicit:
+                print(f"Capability note: {len(explicit)} allowed release(s) expose high-impact agent, process, network, credential, or native surfaces.")
+        print("Hash note: installed directories are version-checked but not byte-verified; use policy verify on the published VSIX before declaring compliance.")
+    return 0 if result["summary"]["compliant"] else 1
+
+
 def _inventory_device_id(ide: str) -> str:
     identity = f"{platform.node()}:{platform.system()}:{ide}".encode("utf-8")
     return f"guardrails-{ide}-{hashlib.sha256(identity).hexdigest()[:20]}"
@@ -235,6 +293,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
         raise ValueError("--profile offline cannot be combined with --online.")
     if args.profile == "offline" and (args.marketplace or args.marketplace_search):
         raise ValueError("Marketplace acquisition requires a network connection and cannot use the offline profile.")
+    if not 1 <= args.runtime_timeout <= 300:
+        raise ValueError("--runtime-timeout must be between 1 and 300 seconds")
     source = "installed"
     selected_rows: list[dict[str, Any]] = []
     if args.marketplace or args.marketplace_search:
@@ -248,6 +308,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 target_platform=args.target_platform,
                 registry_snapshot=args.registry_snapshot,
                 required_providers=required_providers,
+                dynamic_runtime=args.runtime or args.profile == "deep",
+                runtime_timeout_seconds=args.runtime_timeout,
             ),
         )
         source = "marketplace"
@@ -265,6 +327,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 online=args.online or args.profile == "deep",
                 registry_snapshot=args.registry_snapshot,
                 required_providers=required_providers,
+                dynamic_runtime=args.profile == "deep",
+                runtime_timeout_seconds=20,
             ),
         )
         source = "file"
@@ -733,6 +797,7 @@ def _scan_namespace(**overrides: Any) -> argparse.Namespace:
         "file": None, "marketplace": None, "marketplace_search": None,
         "all": False, "ide": None, "search": "", "extension": [], "select": None,
         "version": None, "target_platform": None, "profile": "standard", "online": False,
+        "runtime": False, "runtime_timeout": 20,
         "format": "terminal", "output": None, "show_all": False, "yes": False, "fail_on": "block",
     }
     defaults.update(overrides)

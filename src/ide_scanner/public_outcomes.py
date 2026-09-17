@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .models import ExtensionReport
+from .trust_tiers import derive_trust_tier
 from .capability_contracts import class_contract, classify_extension, expected_capabilities, extension_profile
 
 
@@ -55,13 +56,16 @@ LEGACY_EXPECTED_CAPABILITY_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
+# Compatibility name used by the trust-tier fallback for reports created
+# before capability-contract profiles were introduced.
+EXPECTED_CAPABILITY_PROFILES = LEGACY_EXPECTED_CAPABILITY_PROFILES
+
 _PROVENANCE_CONFLICT_RULES = {
     "known-bad-artifact",
     "marketplace-extension-not-found",
     "marketplace-name-impersonation",
     "marketplace-removed-malware",
     "marketplace-removed-package",
-    "source-vsix-diff-unexplained",
     "trusted-threat-feed-hit",
 }
 _EXPLAINABLE_CLASSES = {"capability", "reputation", "weak"}
@@ -112,6 +116,8 @@ def apply_public_assessment(extension: ExtensionReport) -> None:
         "artifact_identity_consistent": artifact_consistent,
         "profile_id": str(profile["id"]) if profile else "",
     }
+    prior_assessment = extension.capability_assessment if isinstance(extension.capability_assessment, dict) else {}
+    behavioral_verification = prior_assessment.get("behavioral_verification")
     extension.capability_assessment = {
         "profile_id": str(profile["id"]) if profile else "",
         "observed": capability_ids,
@@ -122,6 +128,8 @@ def apply_public_assessment(extension: ExtensionReport) -> None:
         "contract_class": contract_class,
         "forbidden_observed": sorted(set(capability_ids) & forbidden),
     }
+    if isinstance(behavioral_verification, dict):
+        extension.capability_assessment["behavioral_verification"] = behavioral_verification
 
     if extension.decision == "incomplete":
         extension.public_outcome = "incomplete"
@@ -157,6 +165,11 @@ def apply_public_assessment(extension: ExtensionReport) -> None:
         extension.public_outcome = "clear"
         extension.decision_basis = "no_actionable_evidence"
         extension.evidence_confidence = "none"
+
+    tier = derive_trust_tier(extension)
+    extension.trust_tier = tier.tier
+    extension.trust_tier_label = tier.label
+    extension.trust_tier_reason = tier.reason
 
 
 def _evidence_class(finding: Any) -> str:

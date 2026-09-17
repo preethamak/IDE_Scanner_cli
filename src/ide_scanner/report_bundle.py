@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .classification_policy import effective_finding_severity, finding_actionability, finding_evidence_class
+from .evidence import location_from_finding
 from .jsonc import loads_jsonc
 from .models import ExtensionDetail, ExtensionReport, ExtensionSummary, Recommendation, ReportMetadata
 from .rule_registry import rules_json
@@ -158,9 +159,13 @@ def _summary(
     finding_counts: dict[str, int] = {}
     evidence_class_counts: dict[str, int] = {}
     decision_counts = {decision: 0 for decision in ("block", "review", "incomplete", "allow")}
+    analysis_status_counts: dict[str, int] = {}
     for extension in extensions:
         decision_counts[extension.decision] = decision_counts.get(extension.decision, 0) + 1
-        verdict_counts[extension.verdict] = verdict_counts.get(extension.verdict, 0) + 1
+        analysis_status = str(extension.analysis_status or "incomplete")
+        analysis_status_counts[analysis_status] = analysis_status_counts.get(analysis_status, 0) + 1
+        if analysis_status == "complete" and extension.decision != "incomplete":
+            verdict_counts[extension.verdict] = verdict_counts.get(extension.verdict, 0) + 1
         severity_counts[extension.severity] = severity_counts.get(extension.severity, 0) + 1
         for finding in extension.findings:
             finding_counts[finding.rule_id] = finding_counts.get(finding.rule_id, 0) + 1
@@ -180,6 +185,7 @@ def _summary(
             "max_context_score": max((_context_score(extension) for extension in extensions), default=0),
             "posture_status": posture_summary.get("status", "skipped"),
             "decision_counts": decision_counts,
+            "analysis_status_counts": analysis_status_counts,
             "incomplete": decision_counts.get("incomplete", 0),
         },
         "top_risk_extensions": [summary.to_dict() for summary in _rank_summaries(summaries)[:10]],
@@ -227,6 +233,9 @@ def _to_summary(extension: ExtensionReport) -> ExtensionSummary:
         coverage_percent=int(extension.analysis_coverage.get("coverage_percent") or 0),
         analysis_status=extension.analysis_status,
         baseline_changed=bool(extension.baseline_diff.get("baseline_changed")),
+        trust_tier=extension.trust_tier,
+        trust_tier_label=extension.trust_tier_label,
+        trust_tier_reason=extension.trust_tier_reason,
     )
 
 
@@ -298,6 +307,9 @@ def _to_detail(
         analysis_coverage=dict(extension.analysis_coverage),
         analysis_status=extension.analysis_status,
         baseline_diff=dict(extension.baseline_diff),
+        trust_tier=extension.trust_tier,
+        trust_tier_label=extension.trust_tier_label,
+        trust_tier_reason=extension.trust_tier_reason,
     )
 
 
@@ -506,10 +518,10 @@ def _evidence_id(finding: dict[str, Any]) -> str:
 
 
 def _evidence_record(finding: dict[str, Any], *, include_raw_evidence: bool) -> dict[str, Any]:
-    file_refs = list(finding.get("file_refs") or [])
+    location = location_from_finding(finding)
     record = {
-        "file": file_refs[0] if file_refs else "",
-        "line": None,
+        "file": location["file"],
+        "line": location["line"],
         "summary": finding.get("evidence_summary") or "",
         "evidence_class": (finding.get("evidence") or {}).get("evidence_class") if isinstance(finding.get("evidence"), dict) else "weak",
     }
@@ -596,6 +608,9 @@ def _extension_from_dict(data: dict[str, Any]) -> ExtensionReport:
         analysis_coverage=data.get("analysis_coverage") if isinstance(data.get("analysis_coverage"), dict) else {},
         analysis_status=_analysis_status_from_dict(data),  # type: ignore[arg-type]
         baseline_diff=data.get("baseline_diff") if isinstance(data.get("baseline_diff"), dict) else {},
+        trust_tier=str(data.get("trust_tier") or ""),
+        trust_tier_label=str(data.get("trust_tier_label") or ""),
+        trust_tier_reason=str(data.get("trust_tier_reason") or ""),
     )
 
 

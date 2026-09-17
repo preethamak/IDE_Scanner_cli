@@ -32,6 +32,10 @@ VSIX_SIGNATURE_ASSET_TYPE = "Microsoft.VisualStudio.Services.VsixSignature"
 VSIX_SHA256_PROPERTY = "Microsoft.VisualStudio.Services.VsixSha256"
 MAX_VSIX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 MAX_CONFIGURED_VSIX_DOWNLOAD_BYTES = 512 * 1024 * 1024
+# Cap on the decompressed size of a gzip-wrapped VSIX. Matches the archive
+# uncompressed cap enforced later by _safe_extract_vsix so a gzip bomb cannot
+# exhaust disk before the zip-level limits apply.
+MAX_GUNZIP_BYTES = 2 * 1024 * 1024 * 1024
 VSIX_DOWNLOAD_TIMEOUT = 30
 EXTENSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9][A-Za-z0-9._-]*$")
 TARGET_PLATFORM_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
@@ -397,12 +401,15 @@ def _normalize_marketplace_search_row(raw: dict[str, Any]) -> dict[str, Any] | N
     }
 
 
-def _degzip_if_needed(path: Path) -> None:
+def _degzip_if_needed(path: Path, max_bytes: int = MAX_GUNZIP_BYTES) -> None:
     """The vspackage endpoint sometimes serves the VSIX gzip-compressed
     (Content-Encoding: gzip) without a matching urllib auto-decode, so the
     raw bytes on disk start with the gzip magic (1f 8b) instead of the PK
     zip signature. Unwrap it in place before scan_vsix() opens it as a
-    zipfile."""
+    zipfile.
+
+    The decompressed output is capped so a gzip bomb (a few KB expanding to
+    many GB) cannot exhaust disk before the zip-level limits ever apply."""
     with path.open("rb") as handle:
         header = handle.read(2)
     if header != b"\x1f\x8b":

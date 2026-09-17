@@ -124,6 +124,8 @@ class GuardrailsCliTests(unittest.TestCase):
             target_platform="darwin-x64",
             registry_snapshot="prior-report.json",
             required_providers=frozenset({"semgrep", "yara", "dependency_intelligence"}),
+            dynamic_runtime=True,
+            runtime_timeout_seconds=20,
         )
 
     def test_brief_scans_each_exact_candidate_and_fails_closed_for_review(self) -> None:
