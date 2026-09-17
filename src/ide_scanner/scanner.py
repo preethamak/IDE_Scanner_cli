@@ -3236,6 +3236,12 @@ def _apply_sandbox_provider(extensions: list[ExtensionReport], bundle: dict[str,
             provider_status = "not-applicable"
             execution = "policy-gated"
             executed = False
+        elif required and provider_status == "executed":
+            # Runtime execution is a completed provider outcome. Keep the
+            # execution mode in the evidence, but use the canonical provider
+            # status vocabulary so coverage finalization does not downgrade a
+            # successfully executed capability-gated run to incomplete.
+            provider_status = "completed"
         error_count = sum(
             1 for item in items
             if isinstance(item, dict) and str(item.get("kind") or "") in {"runtime_timeout", "sandbox_error"}
