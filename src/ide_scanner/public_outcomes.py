@@ -93,9 +93,16 @@ def apply_public_assessment(extension: ExtensionReport) -> None:
         and extension.artifact_identity.get("version") == extension.version
         and len(str(extension.artifact_identity.get("sha256") or "")) == 64
     )
+    signature = extension.artifact_identity.get("signature") if isinstance(extension.artifact_identity, dict) else {}
+    package_integrity = signature.get("package_integrity") if isinstance(signature, dict) else {}
+    registry_integrity_consistent = not (
+        isinstance(package_integrity, dict)
+        and package_integrity.get("expected")
+        and package_integrity.get("matched") is False
+    )
     established = bool(
         profile and verified and publisher_matches and repository_matches
-        and coverage_complete and artifact_consistent and not conflicted
+        and coverage_complete and artifact_consistent and registry_integrity_consistent and not conflicted
     )
     provenance_tier = "conflicted" if conflicted else "established" if established else "verified" if verified else "unknown"
     contract_class = str(profile.get("class") or classification["primary"]) if profile else str(classification["primary"])

@@ -1179,6 +1179,7 @@ def scan_remote_artifact(
 def _apply_marketplace_integrity(report: ExtensionReport, registry_source: dict[str, str]) -> None:
     expected_sha256 = registry_source.get("expected_sha256", "").lower()
     sha256_verified = registry_source.get("sha256_verified") == "true"
+    integrity_mismatch = registry_source.get("integrity_mismatch") == "true"
     signature_declared = registry_source.get("signature_asset_declared") == "true"
     metadata_matches = registry_source.get("integrity_metadata_matches_artifact") == "true"
     signature = {
@@ -1200,10 +1201,19 @@ def _apply_marketplace_integrity(report: ExtensionReport, registry_source: dict[
             "actual": report.artifact_hash,
             "matched": bool(expected_sha256 and sha256_verified and expected_sha256 == report.artifact_hash),
             "source": "vs-marketplace-version-property" if expected_sha256 else "unavailable",
+            "metadata_mismatch": integrity_mismatch,
         },
     }
     report.artifact_inventory["vsix_signature"] = signature
     report.artifact_identity["signature"] = dict(signature)
+    if integrity_mismatch:
+        warning = (
+            "The Marketplace version metadata SHA-256 did not match the exact bytes served. "
+            "The scanned artifact is identified by its observed SHA-256, but registry integrity "
+            "metadata is not verified."
+        )
+        report.artifact_inventory.setdefault("warnings", []).append(warning)
+        report.artifact_identity["registry_integrity_mismatch"] = True
 
 
 def _marketplace_error_extension(identifier: str, message: str) -> ExtensionReport:

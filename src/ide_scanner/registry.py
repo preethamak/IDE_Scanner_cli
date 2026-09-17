@@ -253,14 +253,33 @@ def download_marketplace_vsix(
     if expected_sha256:
         actual_sha256 = _sha256_file(out_path)
         if actual_sha256 != expected_sha256:
-            out_path.unlink(missing_ok=True)
-            raise MarketplaceDownloadError(
-                f"Downloaded VSIX for {resolved_id}@{target_version} failed the registry SHA-256 check."
-            )
-        if registry_out is not None:
+            # The Marketplace occasionally serves a package whose published
+            # VsixSha256 property is stale (the Jupyter 2026.6.2026071501
+            # release is one observed example). Keep the safe, size-bounded
+            # bytes so they can still be analyzed, but only when the cloud
+            # worker explicitly opts into this disclosed fallback. Local and
+            # CLI scans remain fail-closed by default.
+            allow_mismatch = os.environ.get("IDE_SCANNER_ALLOW_REGISTRY_SHA_MISMATCH", "").strip().lower() in {
+                "1", "true", "yes",
+            }
+            if not allow_mismatch:
+                out_path.unlink(missing_ok=True)
+                raise MarketplaceDownloadError(
+                    f"Downloaded VSIX for {resolved_id}@{target_version} failed the registry SHA-256 check."
+                )
+            if registry_out is not None:
+                registry_out.update({
+                    "expected_sha256": expected_sha256,
+                    "actual_sha256": actual_sha256,
+                    "sha256_verified": "false",
+                    "integrity_mismatch": "true",
+                })
+        elif registry_out is not None:
             registry_out.update({
                 "expected_sha256": expected_sha256,
+                "actual_sha256": actual_sha256,
                 "sha256_verified": "true",
+                "integrity_mismatch": "false",
             })
     if registry_out is not None:
         registry_out.update({
