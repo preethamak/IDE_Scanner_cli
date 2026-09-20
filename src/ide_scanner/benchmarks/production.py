@@ -8,11 +8,16 @@ from typing import Any
 from .runner import load_report
 
 PRODUCTION_CORPUS_SCHEMA_VERSION = "1.0"
+HOLDOUT_CORPUS_SCHEMA_VERSION = "1.0"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 LABELS = {"known_safe", "gray", "known_malicious"}
 VERDICTS = {"clean", "review", "suspicious", "malicious"}
-DECISIONS = {"allow", "review", "block", "incomplete"}
+DECISIONS = {"allow", "review", "block"}
 ANALYSIS_STATUSES = {"complete", "incomplete", "failed"}
+# A known-safe artifact routed to REVIEW is a false-positive/noise signal even
+# when it is not blocked. Keep the publication SLO explicit: at most one in
+# five independently labelled safe artifacts may require review.
+MAX_SAFE_REVIEW_RATE = 0.2
 
 
 def load_production_corpus(path: Path | str) -> dict[str, Any]:
@@ -36,7 +41,7 @@ def validate_production_corpus(data: Any) -> None:
     thresholds = data.get("thresholds")
     if not isinstance(thresholds, dict):
         raise ValueError("Production corpus requires thresholds")
-    for key in ("required_pass_rate", "max_safe_block_rate", "max_malicious_allow_rate"):
+    for key in ("required_pass_rate", "max_safe_block_rate", "max_safe_review_rate", "max_malicious_allow_rate"):
         value = thresholds.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
             raise ValueError(f"Production corpus threshold {key} must be between 0 and 1")
@@ -62,6 +67,7 @@ def evaluate_production_corpus(corpus_path: Path | str, report_path: Path | str)
     gate_checks = {
         "required_pass_rate": summary["required_pass_rate"] >= thresholds["required_pass_rate"],
         "safe_block_rate": summary["safe_block_rate"] <= thresholds["max_safe_block_rate"],
+        "safe_review_rate": summary["safe_review_rate"] <= thresholds["max_safe_review_rate"],
         "malicious_allow_rate": summary["malicious_allow_rate"] <= thresholds["max_malicious_allow_rate"],
         "incomplete_required": summary["incomplete_required"] <= thresholds["max_incomplete_required"],
     }
@@ -84,6 +90,326 @@ def evaluate_production_corpus(corpus_path: Path | str, report_path: Path | str)
         "rule_matrix": _rule_matrix(corpus["artifacts"], rows),
         "artifacts": rows,
     }
+
+
+def evaluate_holdout_corpus(
+    corpus_path: Path | str,
+    report_path: Path | str,
+    *,
+    require_runtime: bool = True,
+) -> dict[str, Any]:
+    """Evaluate a frozen, independently labelled exact-artifact holdout.
+
+    The production regression corpus carries rule-level expectations for
+    synthetic and curated fixtures. A holdout deliberately does not: its
+    labels are fixed before scanning, and the scanner must be judged against
+    the complete exact bytes without teaching the scanner the expected rule.
+    Runtime is required by default so a passing holdout cannot be mistaken for
+    evidence that the dynamic path was exercised.
+    """
+    corpus = _load_holdout_corpus(Path(corpus_path))
+    report = load_report(Path(report_path))
+    actual_by_identity = {
+        _actual_key(item): item
+        for item in report.get("extensions") or []
+        if isinstance(item, dict)
+    }
+    rows = [
+        _evaluate_holdout_artifact(
+            expected,
+            actual_by_identity.get(_expected_key(expected)),
+            require_runtime=require_runtime,
+        )
+        for expected in corpus["artifacts"]
+    ]
+    execution = _corpus_execution(report)
+    runtime_enabled = execution.get("runtime_enabled") is True
+    deep_profile = str(execution.get("profile") or "") == "deep"
+    external_syscall_trace = execution.get("external_syscall_trace") is True
+    summary = _holdout_summary(rows)
+    checks = {
+        "required_pass_rate": summary["required_pass_rate"] == 1.0,
+        "safe_block_rate": summary["safe_block_rate"] == 0.0,
+        "safe_review_rate": summary["safe_review_rate"] <= MAX_SAFE_REVIEW_RATE,
+        "malicious_allow_rate": summary["malicious_allow_rate"] == 0.0,
+        "incomplete_required": summary["incomplete_required"] == 0,
+        "runtime_enabled": runtime_enabled if require_runtime else True,
+        "deep_profile": deep_profile if require_runtime else True,
+        "external_syscall_trace": external_syscall_trace if require_runtime else True,
+    }
+    return {
+        "schema_version": HOLDOUT_CORPUS_SCHEMA_VERSION,
+        "corpus_id": corpus["corpus_id"],
+        "corpus_version": corpus["corpus_version"],
+        "report_identity": _report_identity(report),
+        "runtime_evidence": {
+            "required": require_runtime,
+            "runtime_enabled": runtime_enabled,
+            "profile": execution.get("profile") or "unknown",
+            "external_syscall_trace": external_syscall_trace,
+            "runtime_timeout_seconds": execution.get("runtime_timeout_seconds", 0),
+        },
+        "gate": {
+            "passed": all(checks.values()),
+            "checks": checks,
+            "thresholds": {
+                "required_pass_rate": 1.0,
+                "max_safe_block_rate": 0.0,
+                "max_safe_review_rate": MAX_SAFE_REVIEW_RATE,
+                "max_malicious_allow_rate": 0.0,
+                "max_incomplete_required": 0,
+            },
+        },
+        "summary": summary,
+        "verdict_confusion": _verdict_confusion(rows),
+        "rule_matrix": _holdout_rule_matrix(rows),
+        "artifacts": rows,
+    }
+
+
+def _load_holdout_corpus(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Holdout corpus could not be read: {exc}") from exc
+    if not isinstance(value, dict) or value.get("schema_version") != HOLDOUT_CORPUS_SCHEMA_VERSION:
+        raise ValueError(f"Holdout corpus schema_version must be {HOLDOUT_CORPUS_SCHEMA_VERSION}")
+    if not str(value.get("corpus_id") or "").strip() or not str(value.get("corpus_version") or "").strip():
+        raise ValueError("Holdout corpus requires corpus_id and corpus_version")
+    metadata = value.get("holdout")
+    if not isinstance(metadata, dict) or metadata.get("status") != "fresh-labeled":
+        raise ValueError("Holdout corpus must declare status fresh-labeled")
+    if metadata.get("frozen_before_scan") is not True or metadata.get("original_bytes_available") is not True:
+        raise ValueError("Holdout corpus must be frozen before scanning with original bytes available")
+    artifacts = value.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise ValueError("Holdout corpus requires a non-empty artifacts array")
+    seen: set[tuple[str, str, str]] = set()
+    for index, artifact in enumerate(artifacts):
+        if not isinstance(artifact, dict):
+            raise ValueError(f"Holdout artifact {index} must be an object")
+        extension_id = str(artifact.get("extension_id") or "").strip()
+        version = str(artifact.get("version") or "").strip()
+        target_platform = str(artifact.get("target_platform") or "").strip().lower()
+        key = (_normalized_id(extension_id), version, target_platform)
+        if not extension_id or "." not in extension_id or not version or key in seen:
+            raise ValueError(f"Holdout artifact {index} has an invalid or duplicate identity")
+        seen.add(key)
+        if artifact.get("gate_required") is not True or artifact.get("label") not in {"known_safe", "known_malicious"}:
+            raise ValueError(f"Holdout artifact {index} must be a required known_safe or known_malicious label")
+        source = artifact.get("artifact")
+        if not isinstance(source, dict) or source.get("original_bytes_available") is not True:
+            raise ValueError(f"Holdout artifact {index} must retain original bytes")
+        source_type = str(source.get("source_type") or "")
+        if not source_type or source_type == "fixture_directory":
+            raise ValueError(f"Holdout artifact {index} cannot use a synthetic fixture source")
+        if not SHA256_RE.fullmatch(str(source.get("sha256") or "").lower()):
+            raise ValueError(f"Holdout artifact {index} requires a SHA-256")
+    return value
+
+
+def _corpus_execution(report: dict[str, Any]) -> dict[str, Any]:
+    direct = report.get("corpus_execution")
+    if isinstance(direct, dict):
+        return direct
+    intelligence = report.get("intelligence")
+    if isinstance(intelligence, dict) and isinstance(intelligence.get("corpus_execution"), dict):
+        return intelligence["corpus_execution"]
+    metadata = report.get("metadata")
+    if isinstance(metadata, dict) and isinstance(metadata.get("intelligence_snapshot"), dict):
+        snapshot = metadata["intelligence_snapshot"]
+        if isinstance(snapshot.get("corpus_execution"), dict):
+            return snapshot["corpus_execution"]
+    return {}
+
+
+def _report_identity(report: dict[str, Any]) -> dict[str, str]:
+    metadata = report.get("metadata") if isinstance(report.get("metadata"), dict) else {}
+    return {
+        "scanner_build": str(report.get("scanner_build") or metadata.get("scanner_build") or "unknown"),
+        "policy_version": str(report.get("policy_version") or metadata.get("policy_version") or "legacy"),
+        "ruleset_version": str(report.get("ruleset_version") or metadata.get("ruleset_version") or "legacy"),
+    }
+
+
+def _evaluate_holdout_artifact(
+    expected: dict[str, Any],
+    actual: dict[str, Any] | None,
+    *,
+    require_runtime: bool,
+) -> dict[str, Any]:
+    violations: list[str] = []
+    if actual is None:
+        violations.append("artifact was not present in the scanner report")
+        return _holdout_row(expected, None, violations)
+    analysis_status = str(actual.get("analysis_status") or "incomplete")
+    decision = str(actual.get("decision") or "missing")
+    verdict = str(actual.get("verdict") or "missing")
+    if analysis_status != "complete":
+        violations.append(f"analysis_status {analysis_status!r} is not complete")
+    if decision not in {"allow", "review", "block"}:
+        violations.append(f"decision {decision!r} is not a publishable complete decision")
+    runtime_contract = _runtime_contract(actual)
+    if require_runtime:
+        violations.extend(_runtime_contract_violations(runtime_contract))
+    label = expected["label"]
+    if label == "known_safe":
+        if decision == "block" or verdict == "malicious":
+            violations.append("known-safe artifact was blocked or classified malicious")
+    else:
+        if decision != "block":
+            violations.append(f"known-malicious artifact was not blocked (decision={decision!r})")
+        if verdict not in {"suspicious", "malicious"}:
+            violations.append(f"known-malicious artifact verdict {verdict!r} is not suspicious or malicious")
+    expected_hash = str((expected.get("artifact") or {}).get("sha256") or "").lower()
+    actual_hash = str(actual.get("artifact_hash") or (actual.get("artifact_identity") or {}).get("sha256") or "").lower()
+    if actual_hash != expected_hash:
+        violations.append("artifact SHA-256 does not match the frozen holdout")
+    return _holdout_row(expected, actual, violations, runtime_contract=runtime_contract)
+
+
+def _holdout_row(
+    expected: dict[str, Any],
+    actual: dict[str, Any] | None,
+    violations: list[str],
+    *,
+    runtime_contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "extension_id": expected["extension_id"],
+        "version": expected["version"],
+        "target_platform": str(expected.get("target_platform") or ""),
+        "label": expected["label"],
+        "gate_required": True,
+        "scanned": actual is not None,
+        "passed": not violations,
+        "gate_passed": not violations,
+        "violations": violations,
+        "actual": {} if actual is None else {
+            "verdict": actual.get("verdict"),
+            "decision": actual.get("decision"),
+            "analysis_status": actual.get("analysis_status"),
+            "risk_score": actual.get("risk_score"),
+            "malware_score": actual.get("malware_score"),
+            "artifact_sha256": actual.get("artifact_hash") or (actual.get("artifact_identity") or {}).get("sha256"),
+            "runtime_contract": runtime_contract or {},
+            "rule_ids": sorted({
+                str(item.get("rule_id"))
+                for item in actual.get("findings") or []
+                if isinstance(item, dict) and item.get("rule_id")
+            }),
+        },
+    }
+
+
+def _runtime_contract(actual: dict[str, Any]) -> dict[str, Any]:
+    coverage = actual.get("analysis_coverage") if isinstance(actual.get("analysis_coverage"), dict) else {}
+    providers = coverage.get("providers") if isinstance(coverage.get("providers"), dict) else {}
+    provider = providers.get("dynamic_sandbox") if isinstance(providers.get("dynamic_sandbox"), dict) else {}
+    return {
+        "coverage_status": str(coverage.get("status") or ""),
+        "required_providers_complete": coverage.get("required_providers_complete") is True,
+        "required": provider.get("required") is True,
+        "provider_status": str(provider.get("status") or ""),
+        "execution": str(provider.get("execution") or ""),
+        "runtime_policy": str(provider.get("policy") or ""),
+        "executed": provider.get("executed") is True,
+        "external_syscall_trace": provider.get("external_syscall_trace") is True,
+    }
+
+
+def _runtime_contract_violations(contract: dict[str, Any]) -> list[str]:
+    if contract.get("coverage_status") != "complete" or contract.get("required_providers_complete") is not True:
+        return ["required analysis coverage is not complete"]
+    if contract.get("required") is True:
+        expected = {
+            "provider_status": "completed",
+            "execution": "controlled-bubblewrap",
+            "runtime_policy": "capability-gated-v1",
+            "executed": True,
+            "external_syscall_trace": True,
+        }
+    else:
+        expected = {
+            "provider_status": "not-applicable",
+            "execution": "policy-gated",
+            "runtime_policy": "capability-gated-v1",
+            "executed": False,
+        }
+    mismatches = [
+        f"runtime contract {field}={contract.get(field)!r} expected {value!r}"
+        for field, value in expected.items()
+        if contract.get(field) != value
+    ]
+    return mismatches
+
+
+def _holdout_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    safe = [row for row in rows if row["scanned"] and row["label"] == "known_safe"]
+    malicious = [row for row in rows if row["scanned"] and row["label"] == "known_malicious"]
+    safe_blocks = sum(1 for row in safe if row["actual"].get("decision") == "block" or row["actual"].get("verdict") == "malicious")
+    safe_reviewed = sum(1 for row in safe if _is_review_or_higher(row["actual"]))
+    malicious_allows = sum(1 for row in malicious if row["actual"].get("decision") == "allow" or row["actual"].get("verdict") == "clean")
+    malicious_blocked = sum(1 for row in malicious if row["actual"].get("decision") == "block")
+    malicious_reviewed = sum(1 for row in malicious if row["actual"].get("decision") == "review")
+    malicious_detected = sum(1 for row in malicious if _is_review_or_higher(row["actual"]))
+    dynamic_required = sum(
+        1 for row in rows
+        if row["scanned"] and row["actual"].get("runtime_contract", {}).get("required") is True
+    )
+    dynamic_not_applicable = sum(
+        1 for row in rows
+        if row["scanned"] and row["actual"].get("runtime_contract", {}).get("required") is False
+    )
+    required_passed = sum(1 for row in rows if row["passed"])
+    return {
+        "total_artifacts": len(rows),
+        "scanned_artifacts": sum(1 for row in rows if row["scanned"]),
+        "not_scanned": sum(1 for row in rows if not row["scanned"]),
+        "required_artifacts": len(rows),
+        "required_passed": required_passed,
+        "required_failed": len(rows) - required_passed,
+        "required_pass_rate": round(required_passed / len(rows), 4) if rows else 0.0,
+        "safe_evaluated": len(safe),
+        "safe_blocks": safe_blocks,
+        "safe_block_rate": round(safe_blocks / len(safe), 4) if safe else 0.0,
+        "safe_reviewed": safe_reviewed,
+        "safe_review_rate": round(safe_reviewed / len(safe), 4) if safe else 0.0,
+        "malicious_evaluated": len(malicious),
+        "malicious_allows": malicious_allows,
+        "malicious_allow_rate": round(malicious_allows / len(malicious), 4) if malicious else 0.0,
+        "malicious_blocked": malicious_blocked,
+        "malicious_block_rate": round(malicious_blocked / len(malicious), 4) if malicious else 0.0,
+        "malicious_reviewed": malicious_reviewed,
+        "malicious_review_rate": round(malicious_reviewed / len(malicious), 4) if malicious else 0.0,
+        "malicious_detected": malicious_detected,
+        "malicious_detection_rate": round(malicious_detected / len(malicious), 4) if malicious else 0.0,
+        "dynamic_required": dynamic_required,
+        "dynamic_not_applicable": dynamic_not_applicable,
+        "incomplete_required": sum(
+            1 for row in rows
+            if not row["scanned"] or row["actual"].get("analysis_status") != "complete"
+        ),
+    }
+
+
+def _holdout_rule_matrix(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    matrix: dict[str, dict[str, int]] = {}
+    for row in rows:
+        if not row["scanned"]:
+            continue
+        label_key = f"fired_on_{row['label']}"
+        for rule_id in row["actual"].get("rule_ids") or []:
+            cell = matrix.setdefault(rule_id, {"fired_on_known_safe": 0, "fired_on_known_malicious": 0})
+            cell[label_key] = cell.get(label_key, 0) + 1
+    return dict(sorted(matrix.items()))
+
+
+def _is_review_or_higher(actual: dict[str, Any]) -> bool:
+    return (
+        str(actual.get("decision") or "") in {"review", "block"}
+        or str(actual.get("verdict") or "") in {"review", "suspicious", "malicious"}
+    )
 
 
 def _verdict_confusion(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
@@ -255,7 +581,11 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     safe = [row for row in rows if row["scanned"] and row["label"] == "known_safe"]
     malicious = [row for row in rows if row["scanned"] and row["label"] == "known_malicious"]
     safe_blocks = sum(1 for row in safe if row["actual"].get("decision") == "block" or row["actual"].get("verdict") == "malicious")
+    safe_reviewed = sum(1 for row in safe if _is_review_or_higher(row["actual"]))
     malicious_allows = sum(1 for row in malicious if row["actual"].get("decision") == "allow")
+    malicious_blocked = sum(1 for row in malicious if row["actual"].get("decision") == "block")
+    malicious_reviewed = sum(1 for row in malicious if row["actual"].get("decision") == "review")
+    malicious_detected = sum(1 for row in malicious if _is_review_or_higher(row["actual"]))
     incomplete_required = sum(
         1 for row in required
         if not row["scanned"] or row["actual"].get("analysis_status") != "complete"
@@ -272,9 +602,17 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "safe_evaluated": len(safe),
         "safe_blocks": safe_blocks,
         "safe_block_rate": round(safe_blocks / len(safe), 4) if safe else 0.0,
+        "safe_reviewed": safe_reviewed,
+        "safe_review_rate": round(safe_reviewed / len(safe), 4) if safe else 0.0,
         "malicious_evaluated": len(malicious),
         "malicious_allows": malicious_allows,
         "malicious_allow_rate": round(malicious_allows / len(malicious), 4) if malicious else 0.0,
+        "malicious_blocked": malicious_blocked,
+        "malicious_block_rate": round(malicious_blocked / len(malicious), 4) if malicious else 0.0,
+        "malicious_reviewed": malicious_reviewed,
+        "malicious_review_rate": round(malicious_reviewed / len(malicious), 4) if malicious else 0.0,
+        "malicious_detected": malicious_detected,
+        "malicious_detection_rate": round(malicious_detected / len(malicious), 4) if malicious else 0.0,
         "incomplete_required": incomplete_required,
     }
 

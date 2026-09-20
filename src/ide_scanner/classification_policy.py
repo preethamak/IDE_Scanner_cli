@@ -58,6 +58,13 @@ _REVIEW_POSTURE_RULES = {
     "executable-heavy-obfuscation",
 }
 
+_LOW_OBSERVED_RULES = {
+    # Opening a credential-shaped file is worth surfacing, but it is not
+    # evidence of misuse until the scanner observes the value flowing to a
+    # network, process, persistence, or destructive sink.
+    "observed-secret-read",
+}
+
 
 def finding_actionability(finding: Any) -> FindingActionability:
     evidence_class = finding_evidence_class(finding)
@@ -67,6 +74,8 @@ def finding_actionability(finding: Any) -> FindingActionability:
         return "block"
     if evidence_class == "vulnerability":
         return "block" if str(_evidence(finding).get("policy_action") or "review") == "block" else "review"
+    if evidence_class == "observed" and rule_id in _LOW_OBSERVED_RULES:
+        return "low"
     if evidence_class in {"correlated", "observed"}:
         return "review"
     if evidence_class == "dependency":

@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import sys
 import tempfile
 import zipfile
 from importlib.metadata import PackageNotFoundError, distribution
@@ -13,6 +14,18 @@ from pathlib import Path
 from typing import Any, Callable
 
 from guardrails_cli import __version__
+
+
+# Prefer the engine shipped beside this CLI over a separately installed
+# ``ide_scanner`` distribution. This matters for editable development installs
+# and for machines that previously installed an older scanner package: the
+# integrity manifest must verify the exact engine that the CLI will import.
+_BUNDLED_SOURCE_ROOT = Path(__file__).resolve().parents[1]
+try:
+    sys.path.remove(str(_BUNDLED_SOURCE_ROOT))
+except ValueError:
+    pass
+sys.path.insert(0, str(_BUNDLED_SOURCE_ROOT))
 
 
 def _engine_manifest() -> dict[str, Any]:
@@ -127,6 +140,8 @@ def scan_paths(
     online: bool = False,
     registry_snapshot: str | Path | None = None,
     required_providers: set[str] | frozenset[str] | None = None,
+    dynamic_runtime: bool = False,
+    runtime_timeout_seconds: int = 20,
 ) -> dict[str, Any]:
     verify_engine_integrity()
     return _run_engine_scan(
@@ -136,6 +151,8 @@ def scan_paths(
             registry_snapshot_file=registry_snapshot,
             include_posture=False,
             required_providers=required_providers,
+            dynamic_runtime=dynamic_runtime,
+            runtime_timeout_seconds=runtime_timeout_seconds,
         )
     )
 

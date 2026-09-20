@@ -14,7 +14,7 @@ Insiders without executing extension code.
   guardrails                 Open the interactive Local Scan application
   guardrails scan --all      Scan every detected installation
   guardrails help scan       Learn how scan targets and filters work
-  guardrails doctor          Check analyzers and detected IDEs
+  guardrails doctor          Check analyzers, runtime sandbox, and IDEs
 
 ## Command map
 
@@ -24,7 +24,7 @@ Insiders without executing extension code.
   rules      Browse or search the local detection-rule catalog
   metrics    Explain decisions, scores, evidence, and coverage
   policy     Check installations or published artifact hashes against an enterprise policy
-  doctor     Check the scanner engine, analyzers, terminal, and IDE discovery
+  doctor     Check the scanner engine, analyzers, runtime sandbox, terminal, and IDE discovery
   help       Open this manual or a specific topic
   tui        Explicitly open the interactive Local Scan application
   version    Print the installed Guardrails version
@@ -69,8 +69,9 @@ Other artifacts:
   guardrails scan --file ./unpacked-extension
   guardrails scan --marketplace publisher.extension@1.2.3
 
-Deep Marketplace scans run the executable-capability portion of the artifact in
-a Bubblewrap namespace with networking disabled. Themes and other packages
+Deep scans run the executable-capability portion of the exact artifact in a
+Bubblewrap namespace with networking disabled. This applies to Marketplace,
+local, uploaded, and installed-extension inputs. Themes and other packages
 without executable capability are recorded as not applicable. Use `--runtime`
 to request this pass outside the deep profile.
 

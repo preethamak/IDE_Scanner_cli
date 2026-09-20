@@ -7,6 +7,8 @@ from typing import Any
 
 from .scanner_adapter import analysis_provider_diagnostics, engine_identity, installed_extensions
 from .ui.theme import supports_color
+from ide_scanner.rule_registry import rules_json
+from ide_scanner.sandbox_runner import sandbox_preflight
 
 
 DoctorCheck = tuple[str, str, str]
@@ -15,17 +17,24 @@ DoctorCheck = tuple[str, str, str]
 def doctor_checks() -> list[DoctorCheck]:
     installed = installed_extensions()
     engine = engine_identity()
+    catalog = rules_json()
     providers = analysis_provider_diagnostics(probe=True)
+    runtime = sandbox_preflight()
     return [
         ("Python", "OK", sys.version.split()[0]),
         (
             "Scanner",
             "OK" if importlib.util.find_spec("ide_scanner") else "FAIL",
-            f"engine {engine['version']} · build {engine['build'][:12]}",
+            f"engine {engine['version']} · build {engine['build'][:12]} · rules {catalog.get('ruleset_version', 'unknown')} ({len(catalog.get('rules') or [])})",
         ),
         ("Node AST", "OK" if shutil.which("node") else "FAIL", shutil.which("node") or "node not found"),
         _provider_check("Semgrep", providers["semgrep"]),
         _provider_check("YARA", providers["yara"]),
+        (
+            "Dynamic sandbox",
+            "OK" if runtime.get("status") == "ready" else "FAIL",
+            str(runtime.get("error") or "Bubblewrap namespace ready"),
+        ),
         ("Installed extensions", "OK" if installed else "WARN", f"{len(installed)} detected"),
         (
             "Color terminal",

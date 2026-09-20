@@ -19,6 +19,12 @@ from ide_scanner.rule_registry import rules_json
 
 
 class EngineParityTests(unittest.TestCase):
+    def test_cli_prefers_the_bundled_engine_over_an_older_installed_distribution(self) -> None:
+        import ide_scanner
+
+        expected_root = (Path(__file__).parents[1] / "src" / "ide_scanner").resolve()
+        self.assertEqual(Path(ide_scanner.__file__).resolve().parent, expected_root)
+
     def test_deep_profile_uses_shared_engine_provider_contract(self) -> None:
         observed = {}
         run_with_profile("deep", lambda providers: observed.update(required=providers) or {})

@@ -451,6 +451,11 @@ def _yara_finding(
     evidence_class: str,
     rel: str,
 ) -> Finding:
+    summary = (
+        f"YARA rule {rule_name} matched encoded dynamic-execution markers in executable code."
+        if rule_id == "encoded-dynamic-execution"
+        else f"YARA rule {rule_name} matched {rel}."
+    )
     return _provider_finding(
         extension_id,
         version,
@@ -458,7 +463,7 @@ def _yara_finding(
         category,
         severity,
         0.8 if evidence_class == "correlated" else 0.68,
-        f"YARA rule {rule_name} matched {rel}.",
+        summary,
         [rel],
         "Inspect the matched bytes and validate the rule provenance before taking action.",
         {"provider": "yara", "provider_rule_id": rule_name, "evidence_class": evidence_class},

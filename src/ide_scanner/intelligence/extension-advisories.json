@@ -1,6 +1,19 @@
 {
-  "snapshot_version": "2026-07-22.2",
+  "snapshot_version": "2026-09-19.6",
   "entries": [
+    {
+      "extension_id": "nrwl.angular-console",
+      "version": "18.95.0",
+      "artifact_sha256": "1a4afce34918bdc74ae3f31edaffffaa0ee074d83618f53edfd88137927340b8",
+      "advisory_id": "GHSA-c9j4-9m59-847w",
+      "severity": "CRITICAL",
+      "published_at": "2026-05-18T00:00:00Z",
+      "policy_action": "block",
+      "threat_classification": "malicious",
+      "source": "https://github.com/nrwl/nx-console/security/advisories/GHSA-c9j4-9m59-847w",
+      "source_secondary": "https://phoenix.security/vs-code-extension-malware-github-breach-teampcp-2026/",
+      "summary": "The official Nx Console advisory identifies version 18.95.0 as compromised; Phoenix Security independently published this exact VSIX hash and reported credential harvesting and persistence."
+    },
     {
       "extension_id": "formulahendry.code-runner",
       "version": "0.12.2",
@@ -12,6 +25,153 @@
       "policy_action": "block",
       "source": "https://nvd.nist.gov/vuln/detail/CVE-2025-65715",
       "summary": "The configurable executor command reaches shell-enabled process execution, allowing arbitrary command execution when configuration is attacker-controlled."
+    },
+    {
+      "extension_id": "noellee-doc.flint-debug",
+      "version": "0.1.1",
+      "artifact_sha256": "3aa31999398e7f80231c03d7137ffdb554a84b83dbcffc59ce16c9a65f9e5d58",
+      "advisory_id": "SOCKET-GLASSWASM-2026-FLINT-DEBUG",
+      "severity": "CRITICAL",
+      "published_at": "2026-06-15T00:00:00Z",
+      "policy_action": "block",
+      "threat_classification": "malicious",
+      "source": "https://socket.dev/blog/glasswasm-malware-open-vsx-extensions",
+      "summary": "Socket reported this exact Open VSX artifact as a trojanized extension containing an obfuscated WebAssembly loader that retrieves and executes a follow-on payload."
+    },
+    {
+      "extension_id": "exargd.vsblack",
+      "version": "0.0.1",
+      "artifact_sha256": "1e283327ad048bea39f4a8501770858a20f3555e87fe3e202274f2e87f8a3c25",
+      "advisory_id": "SOCKET-GLASSWASM-2026-VSBLACK",
+      "severity": "CRITICAL",
+      "published_at": "2026-06-15T00:00:00Z",
+      "policy_action": "block",
+      "threat_classification": "malicious",
+      "source": "https://socket.dev/blog/glasswasm-malware-open-vsx-extensions",
+      "summary": "Socket reported this exact Open VSX artifact as a trojanized theme carrying an obfuscated WebAssembly loader that retrieves and executes a follow-on payload."
+    },
+    {
+      "extension_id": "Iconkieftwo.icon-theme-materiall",
+      "version": "5.29.1",
+      "artifact_sha256": "0878f3c59755ffaf0b639c1b2f6e8fed552724a50eb2878c3ba21cf8eb4e2ab6",
+      "advisory_id": "NEXTRON-MATERIAL-ICON-THEME-2025-5.29.1",
+      "severity": "CRITICAL",
+      "published_at": "2025-11-28T00:00:00Z",
+      "policy_action": "block",
+      "threat_classification": "malicious",
+      "source": "https://www.nextron-systems.com/2025/11/28/malicious-vs-code-extension-impersonating-material-icon-theme-found-in-marketplace/",
+      "source_secondary": "https://raw.githubusercontent.com/trailofbits/vsix-zoo/main/manifest.json",
+      "summary": "Nextron Systems reported this exact Marketplace artifact as a malicious Material Icon Theme impersonator; the VSIX Zoo manifest independently preserves the reported hash."
+    },
+    {
+      "extension_id": "msjsdreact.react-native-vscode",
+      "version": "1.13.1",
+      "artifact_sha256": "bb68992f6aa2d3f316322e88d9e71491a38e95fd3a27f48084c66b9c210bd17d",
+      "advisory_id": "MALWAREBAZAAR-GLASSWORM-REACT-NATIVE-2025-1.13.1",
+      "severity": "CRITICAL",
+      "published_at": "2025-11-28T00:00:00Z",
+      "policy_action": "block",
+      "threat_classification": "malicious",
+      "source": "https://bazaar.abuse.ch/sample/bb68992f6aa2d3f316322e88d9e71491a38e95fd3a27f48084c66b9c210bd17d/",
+      "source_secondary": "https://raw.githubusercontent.com/trailofbits/vsix-zoo/main/manifest.json",
+      "summary": "MalwareBazaar and the VSIX Zoo preserve this exact VSIX as a GlassWorm campaign sample targeting React Native developers, with credential-theft and crypto-wallet capabilities."
+    },
+    {
+      "extension_id": "priskinski.Theme-AllHallowsEve-remake",
+      "version": "1.0.0",
+      "artifact_sha256": "a9a6a03bd6958710aeacc2a23860a7f7f0d09497fef85fe658ac5406734061f8",
+      "advisory_id": "MALWAREBAZAAR-PRISKINSKI-THEME-2025-1.0.0",
+      "severity": "CRITICAL",
+      "published_at": "2025-12-10T00:00:00Z",
+      "policy_action": "block",
+      "threat_classification": "malicious",
+      "source": "https://bazaar.abuse.ch/sample/a9a6a03bd6958710aeacc2a23860a7f7f0d09497fef85fe658ac5406734061f8/",
+      "source_secondary": "https://raw.githubusercontent.com/trailofbits/vsix-zoo/main/manifest.json",
+      "summary": "MalwareBazaar and the VSIX Zoo preserve this exact theme VSIX as a ReversingLabs-disclosed Trojan carrying a Rust payload disguised as an image asset."
+    },
+    {
+      "extension_id": "bingcha.bcai-tools",
+      "version": "4.0.37",
+      "artifact_sha256": "b1b9785cdc7be479061f121f282391fba9be013d896d9a54f395621634709216",
+      "advisory_id": "KNOSTIC-BCAI-2026-4.0.37",
+      "severity": "CRITICAL",
+      "published_at": "2026-05-20T00:00:00Z",
+      "policy_action": "block",
+      "threat_classification": "malicious",
+      "source": "https://www.knostic.ai/blog/agentic-threat-intelligence-feed-vs-code-extensions",
+      "summary": "Knostic reported this exact Open VSX artifact as malicious after source validation, including Google OAuth refresh-token theft, full GCP scope access, and proxying of AI API use."
+    },
+    {
+      "extension_id": "DorianN612.remote-text-fetcher",
+      "version": "0.0.1",
+      "artifact_sha256": "8136e6e1260e85c860c26245e7622c8bc2f82d741afb445e9ddccaee78990f4b",
+      "advisory_id": "KNOSTIC-REMOTE-TEXT-FETCHER-2026-0.0.1",
+      "severity": "CRITICAL",
+      "published_at": "2026-06-02T00:00:00Z",
+      "policy_action": "block",
+      "threat_classification": "malicious",
+      "source": "https://www.knostic.ai/blog/new-malicious-vs-code-extension-backdoor-remote-text-fetcher",
+      "summary": "Knostic reported this exact Marketplace artifact as a startup backdoor that fetches operator-controlled text, decodes it, and executes it through child_process.exec."
+    },
+    {
+      "extension_id": "NoahBit.api-reactor",
+      "version": "0.0.1",
+      "artifact_sha256": "ca272b481f630635cd059f85321dbc7be372e75820536ccbfd29dfcf571ab45c",
+      "advisory_id": "KNOSTIC-API-REACTOR-2026-0.0.1",
+      "severity": "CRITICAL",
+      "published_at": "2026-06-29T00:00:00Z",
+      "policy_action": "block",
+      "threat_classification": "malicious",
+      "source": "https://www.knostic.ai/blog/the-source-looked-clean-the-binary-wasnt?hs_amp=true",
+      "summary": "Knostic reported this exact Marketplace artifact as a source/binary-divergent startup backdoor with hidden remote command retrieval and child_process.exec."
+    },
+    {
+      "extension_id": "KoltinSmith.project-restructure-nodejs",
+      "version": "1.0.0",
+      "artifact_sha256": "366052e4cd801cb4a3fb09376e79288a3d22e820ba21b41d4a07627d8674c6a0",
+      "advisory_id": "KNOSTIC-KOLTINSMITH-2026-1.0.0",
+      "severity": "CRITICAL",
+      "published_at": "2026-05-20T00:00:00Z",
+      "policy_action": "block",
+      "threat_classification": "malicious",
+      "source": "https://www.knostic.ai/blog/agentic-threat-intelligence-feed-vs-code-extensions",
+      "summary": "Knostic reported this exact Marketplace artifact as an auto-starting environment-data exfiltration and remote-eval backdoor."
+    },
+    {
+      "extension_id": "sunsetHightlight.sunset-highlight",
+      "version": "0.0.2",
+      "artifact_sha256": "217244bbc47e6cd2d24aff82e670d97bb66711ab4edcca44976c42ff2baa56db",
+      "advisory_id": "KNOSTIC-SUNSETHIGHLIGHT-2026-0.0.2",
+      "severity": "CRITICAL",
+      "published_at": "2026-05-20T00:00:00Z",
+      "policy_action": "block",
+      "threat_classification": "malicious",
+      "source": "https://www.knostic.ai/blog/agentic-threat-intelligence-feed-vs-code-extensions",
+      "summary": "Knostic reported this exact Marketplace artifact as an environment-exfiltration backdoor with hidden encrypted second-stage execution."
+    },
+    {
+      "extension_id": "Jumbo.JumboKey",
+      "version": "1.0.2",
+      "artifact_sha256": "9ea98af53a6163497ad92860e60e4c767a72d4199e42ae414876bff469c208bb",
+      "advisory_id": "KNOSTIC-JUMBOKEY-2026-1.0.2",
+      "severity": "CRITICAL",
+      "published_at": "2026-07-21T00:00:00Z",
+      "policy_action": "block",
+      "threat_classification": "malicious",
+      "source": "https://www.knostic.ai/blog/analyzing-two-malicious-vs-code-extensions-hidden-behind-a-wordpress-tool",
+      "summary": "Knostic reported this exact Marketplace artifact as an auto-starting downloader that launches an external MSI installer."
+    },
+    {
+      "extension_id": "JumboCore.Jumbos",
+      "version": "1.0.0",
+      "artifact_sha256": "63688d7765e52cf9800ea0dfc296bc86a448d241108c17c564709a6a844816fc",
+      "advisory_id": "KNOSTIC-JUMBOCORE-2026-1.0.0",
+      "severity": "CRITICAL",
+      "published_at": "2026-07-21T00:00:00Z",
+      "policy_action": "block",
+      "threat_classification": "malicious",
+      "source": "https://www.knostic.ai/blog/analyzing-two-malicious-vs-code-extensions-hidden-behind-a-wordpress-tool",
+      "summary": "Knostic reported this exact Marketplace artifact as an auto-starting downloader that launches an external MSI installer."
     }
   ]
 }

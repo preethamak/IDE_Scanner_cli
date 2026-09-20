@@ -4,7 +4,7 @@ from .classification_policy import POLICY_VERSION
 from .models import RuleMetadata
 from .rules import CODE_RULES
 
-RULESET_VERSION = "2026.09.17-policy-v3-calibration.13"
+RULESET_VERSION = "2026.09.21-policy-v3-calibration.32-dynamic-capability-gate"
 
 
 _RULE_OVERRIDES: dict[str, dict[str, object]] = {
@@ -68,9 +68,9 @@ _RULE_OVERRIDES: dict[str, dict[str, object]] = {
         "category": "credential-access",
         "evidence_class": "correlated",
         "default_severity": "HIGH",
-        "description": "Detects code paths combining credential references, local file reads, and outbound transfer.",
-        "recommendation": "Review source and remove the extension if behavior is unexpected.",
-        "false_positive_notes": "May trigger on legitimate cloud tooling or credential helpers.",
+        "description": "Detects a credential-file value reaching an outbound request through a bounded local data flow.",
+        "recommendation": "Verify the exact credential source, destination, and user-authorized purpose before allowing the extension.",
+        "false_positive_notes": "Authenticated cloud tooling may intentionally send user-authorized credentials; proximity without value flow is not sufficient for this rule.",
         "benchmark_tags": ["credential", "filesystem", "network"],
     },
     "credential-harvesting-exfiltration": {
@@ -88,9 +88,9 @@ _RULE_OVERRIDES: dict[str, dict[str, object]] = {
         "category": "credential-access",
         "evidence_class": "correlated",
         "default_severity": "HIGH",
-        "description": "Detects a generated executable bundle that combines systematic obfuscation, multi-family credential targets, filesystem collection, payload packaging, and outbound transfer semantics.",
+        "description": "Detects a generated executable bundle whose bounded local code window combines systematic obfuscation, multi-family credential targets, filesystem collection, payload packaging, and outbound transfer semantics.",
         "recommendation": "Prevent execution and investigate the credential targets, collection APIs, and outbound destination.",
-        "false_positive_notes": "Legitimate migration or backup products may collect multiple credential families, but obfuscated IDE entrypoints should not do so without independently verifiable source and explicit user intent.",
+        "false_positive_notes": "Legitimate migration or backup products may collect multiple credential families, but whole-bundle keyword proximity is insufficient; this rule requires the collection and outbound stages to be locally linked and still needs independently verifiable source and explicit user intent.",
         "benchmark_tags": ["credential", "filesystem", "network", "obfuscation", "bundle"],
     },
     "executable-heavy-obfuscation": {
@@ -139,6 +139,7 @@ _RULE_OVERRIDES: dict[str, dict[str, object]] = {
         "default_severity": "HIGH",
         "description": "Detects source files that can download content and execute local processes.",
         "recommendation": "Verify download source, integrity checks, and execution purpose.",
+        "false_positive_notes": "Legitimate language servers and tool installers may use this shape. Keep it review-worthy unless direct credential transfer, destructive behavior, independent threat intelligence, or runtime abuse evidence is established.",
         "benchmark_tags": ["download", "execution", "network"],
     },
     "remote-vsix-install-chain": {
@@ -147,8 +148,8 @@ _RULE_OVERRIDES: dict[str, dict[str, object]] = {
         "evidence_class": "correlated",
         "default_severity": "HIGH",
         "description": "Detects remote VSIX download, local write, and IDE installation without visible integrity verification.",
-        "recommendation": "Require explicit approval and verify the VSIX through an independent trusted hash or signature before installation.",
-        "false_positive_notes": "Legitimate enterprise updaters may install extensions, but should use independently trusted integrity metadata and visible approval.",
+        "recommendation": "Review the download source and require an independent trusted hash or signature plus explicit user approval before installation.",
+        "false_positive_notes": "Legitimate IDE tooling and enterprise updaters may install extensions. This rule is review evidence unless it is correlated with direct credential transfer, destructive behavior, or observed execution abuse.",
         "benchmark_tags": ["download", "extension-install", "supply-chain"],
     },
     "lifecycle-script": {
@@ -196,6 +197,16 @@ _RULE_OVERRIDES: dict[str, dict[str, object]] = {
         "description": "Exact extension identity, version, and artifact hash matched a versioned vulnerability advisory.",
         "recommendation": "Follow the advisory policy action for this exact artifact.",
         "benchmark_tags": ["vulnerability", "advisory", "exact-artifact"],
+    },
+    "known-malicious-extension": {
+        "title": "Known malicious extension artifact",
+        "category": "confirmed-intelligence",
+        "evidence_class": "confirmed",
+        "default_severity": "CRITICAL",
+        "description": "Exact extension identity, version, and artifact hash matched an authoritative advisory reporting the artifact as malicious or compromised.",
+        "recommendation": "Block and remove the exact artifact. Rotate any credentials or tokens that may have been exposed while it was installed.",
+        "false_positive_notes": "This rule is emitted only for an exact artifact hash in the signed/bundled advisory snapshot; an advisory describing a vulnerability remains a separate vulnerability finding.",
+        "benchmark_tags": ["threat-intelligence", "advisory", "exact-artifact", "malware"],
     },
     "marketplace-removed-package": {
         "title": "Marketplace removed package",
@@ -416,6 +427,16 @@ _RULE_OVERRIDES: dict[str, dict[str, object]] = {
         "recommendation": "Review the written value and destination; proximity alone does not show that a credential is persisted.",
         "benchmark_tags": ["credential", "filesystem", "proximity"],
     },
+    "remote-credential-broker": {
+        "title": "Remote credential broker",
+        "category": "cross-extension-exposure",
+        "evidence_class": "exposure",
+        "default_severity": "HIGH",
+        "description": "Code appears to obtain or forward bearer tokens through a separately configured remote token broker.",
+        "recommendation": "Verify endpoint ownership, token scope, retention, and user disclosure. This is a trust-boundary review signal, not proof of exfiltration or malicious intent.",
+        "false_positive_notes": "Legitimate account proxies and hosted API clients can use remote token brokers; review the endpoint and token boundary rather than labeling the extension malicious.",
+        "benchmark_tags": ["credential", "network", "token-broker", "cross-extension"],
+    },
     "agent-sensitive-data-near-network": {
         "title": "Agent-sensitive data near network",
         "category": "agentic",
@@ -483,14 +504,22 @@ _NATIVE_RULE_DEFAULTS: dict[str, tuple[str, str, str, str]] = {
     "repo-binary-artifacts": ("repository-posture", "posture", "LOW", "The package contains a committed native binary artifact."),
     "repo-url-missing": ("reputation", "reputation", "LOW", "The extension manifest does not declare a source repository."),
     "runtime-filesystem-write": ("dynamic-sandbox", "weak", "INFO", "The sandbox observed a filesystem write; this confirms capability, not malicious intent."),
+    "runtime-canary-exposed": ("dynamic-sandbox", "weak", "INFO", "The sandbox observed the synthetic canary in process output; this does not establish external transfer."),
     "runtime-network-attempt": ("dynamic-sandbox", "weak", "INFO", "The sandbox observed an attempted network request; isolation does not establish that it completed."),
     "runtime-process-execution": ("dynamic-sandbox", "weak", "INFO", "The sandbox observed process execution; this confirms capability, not malicious intent."),
     "sandbox-runtime-error": ("coverage", "weak", "INFO", "The runtime sandbox could not complete one execution phase, so dynamic coverage is incomplete."),
+    "runtime-lifecycle-error": ("dynamic-sandbox", "weak", "INFO", "A lifecycle script exited unsuccessfully; this does not by itself invalidate the activation probe."),
     "sandbox-runtime-timeout": ("coverage", "weak", "INFO", "The runtime sandbox timed out during one execution phase, so dynamic coverage is incomplete."),
+    "observed-secret-read": ("dynamic-sandbox", "observed", "MEDIUM", "The sandbox observed reads of a synthetic canary or sensitive credential path."),
+    "observed-secret-exfil": ("dynamic-sandbox", "observed", "HIGH", "The sandbox observed a synthetic canary or sensitive value in a network request body."),
+    "observed-download-execute": ("dynamic-sandbox", "observed", "HIGH", "The sandbox observed downloaded content being executed or loaded."),
+    "observed-persistence": ("dynamic-sandbox", "observed", "HIGH", "The sandbox observed writes to a persistence or autorun location."),
+    "observed-destructive-behavior": ("dynamic-sandbox", "observed", "HIGH", "The sandbox observed destructive file behavior."),
     "security-policy-missing": ("repository-posture", "reputation", "LOW", "The packaged artifact does not include a recognized security policy."),
     "sensitive-activation": ("activation", "capability", "LOW", "The extension activates on a security-sensitive IDE event."),
     "startup-activation": ("activation", "capability", "LOW", "The extension activates automatically after IDE startup."),
     "unpinned-dependency": ("dependency", "dependency", "LOW", "A runtime dependency uses an unpinned version specifier."),
+    "wasm-loader": ("artifact", "capability", "MEDIUM", "The extension ships WebAssembly and executable code that loads or instantiates the module."),
     "webview-csp-missing": ("webview", "capability", "MEDIUM", "A detected webview lacks a Content-Security-Policy meta tag."),
     "webview-csp-unsafe-directive": ("webview", "capability", "MEDIUM", "A webview CSP contains an unsafe directive."),
     "workflow-token-permissions-broad": ("repository-posture", "posture", "LOW", "A workflow grants broad token permissions or relies on implicit defaults."),
@@ -566,7 +595,7 @@ def _engine_for(rule_id: str, tags: list[str]) -> str:
         return "yara"
     if rule_id.startswith("ast-"):
         return "javascript-ast"
-    if rule_id in {"known-bad-artifact", "marketplace-removed-package"}:
+    if rule_id in {"known-bad-artifact", "known-malicious-extension", "marketplace-removed-package"}:
         return "threat-intelligence"
     if rule_id in {"malicious-npm-dependency", "vulnerable-npm-dependency"}:
         return "dependency-intelligence"
@@ -584,7 +613,7 @@ def _decision_effect(evidence_class: str) -> str:
         return "block-by-default"
     if evidence_class == "vulnerability":
         return "review-or-block-by-policy"
-    if evidence_class in {"correlated", "dependency", "provenance"}:
+    if evidence_class in {"correlated", "dependency", "observed", "provenance"}:
         return "review-or-block-by-policy"
     if evidence_class in {"capability", "exposure"}:
         return "review-by-policy"

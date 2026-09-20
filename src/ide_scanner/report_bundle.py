@@ -314,7 +314,13 @@ def _to_detail(
 
 
 def grade_extension(verdict: str, risk_score: int, malware_score: int, findings: list[Any] | None = None) -> str:
-    has_high_or_medium = any(str(getattr(finding, "severity", "")) in {"HIGH", "MEDIUM", "CRITICAL"} for finding in findings or [])
+    # Grades are a user-facing summary.  Use the same actionability policy as
+    # verdict classification so a contextual HIGH detector signal cannot make
+    # an otherwise reviewable extension look more dangerous in the dashboard.
+    has_high_or_medium = any(
+        effective_finding_severity(finding) in {"HIGH", "MEDIUM", "CRITICAL"}
+        for finding in findings or []
+    )
     if verdict == "malicious" or malware_score >= 90:
         return "F"
     if verdict == "suspicious" or risk_score >= 75 or malware_score >= 70:

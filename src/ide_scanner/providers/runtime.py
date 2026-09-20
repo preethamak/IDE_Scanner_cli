@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import os
+import selectors
 import signal
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -30,6 +32,9 @@ SEMGREP_RULE_TIMEOUT_SECONDS = 15
 SEMGREP_MEMORY_LIMIT_MB = 1536
 PROVIDER_MEMORY_LIMIT_MB = 1536
 PROVIDER_FILE_SIZE_LIMIT_MB = 64
+PROVIDER_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024
+PROVIDER_OUTPUT_CHUNK_BYTES = 64 * 1024
+PROVIDER_OUTPUT_LIMIT_MARKER = "GUARDRAILS_PROVIDER_OUTPUT_LIMIT"
 
 
 def semgrep_timeout_seconds() -> int:
@@ -56,6 +61,14 @@ def run_bounded_process(
     file_size_limit_mb: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a provider without allowing timed-out descendants to survive."""
+    process_env = dict(env) if env is not None else os.environ.copy()
+    # Source checkouts invoke the bounded workers before the package is
+    # installed. Preserve that supported execution mode by making the local
+    # package importable to the child, while retaining caller-provided values.
+    source_root = str(Path(__file__).resolve().parents[2])
+    pythonpath = process_env.get("PYTHONPATH", "")
+    if source_root not in pythonpath.split(os.pathsep):
+        process_env["PYTHONPATH"] = os.pathsep.join(item for item in (source_root, pythonpath) if item)
     popen_options: dict[str, Any] = {}
     if os.name == "posix":
         popen_options["start_new_session"] = True
@@ -65,19 +78,122 @@ def run_bounded_process(
         popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     process = subprocess.Popen(
         command,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
-        env=env,
+        env=process_env,
         **popen_options,
     )
+    # Keep a small compatibility path for callers that replace Popen with a
+    # minimal test double. Real provider processes always expose both pipes.
+    if not hasattr(process, "stdout") or not hasattr(process, "stderr"):
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(process)
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+    stdout_bytes, stderr_bytes, output_limited = _communicate_bounded(process, command, timeout)
+    if output_limited:
+        # A truncated provider payload is never a successful analysis. Force a
+        # non-zero status even if the child exited between the final read and
+        # the parent enforcing the cap.
+        stderr_bytes += ("\n" + PROVIDER_OUTPUT_LIMIT_MARKER + "\n").encode("utf-8")
+    returncode = process.returncode if not output_limited else -9
+    return subprocess.CompletedProcess(
+        command,
+        returncode,
+        stdout_bytes.decode("utf-8", errors="replace"),
+        stderr_bytes.decode("utf-8", errors="replace"),
+    )
+
+
+def _communicate_bounded(
+    process: subprocess.Popen[bytes],
+    command: list[str],
+    timeout: int | float,
+) -> tuple[bytes, bytes, bool]:
+    """Read provider pipes with a hard parent-memory ceiling."""
+    assert process.stdout is not None
+    assert process.stderr is not None
+    selector = selectors.DefaultSelector()
+    streams = {process.stdout: bytearray(), process.stderr: bytearray()}
+    for stream in streams:
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ)
+
+    deadline = time.monotonic() + float(timeout)
+    output_limited = False
+
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _terminate_process_tree(process)
-        stdout, stderr = process.communicate()
-        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        while selector.get_map():
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining == 0.0:
+                _terminate_process_tree(process)
+                _close_process_pipes(selector, streams)
+                raise subprocess.TimeoutExpired(
+                    command,
+                    timeout,
+                    output=bytes(streams[process.stdout]).decode("utf-8", errors="replace"),
+                    stderr=bytes(streams[process.stderr]).decode("utf-8", errors="replace"),
+                )
+            ready = selector.select(remaining)
+            if not ready:
+                _terminate_process_tree(process)
+                _close_process_pipes(selector, streams)
+                raise subprocess.TimeoutExpired(
+                    command,
+                    timeout,
+                    output=bytes(streams[process.stdout]).decode("utf-8", errors="replace"),
+                    stderr=bytes(streams[process.stderr]).decode("utf-8", errors="replace"),
+                )
+            for key, _ in ready:
+                stream = key.fileobj
+                try:
+                    chunk = os.read(stream.fileno(), PROVIDER_OUTPUT_CHUNK_BYTES)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                buffer = streams[stream]
+                remaining_bytes = PROVIDER_OUTPUT_LIMIT_BYTES - len(buffer)
+                if len(chunk) > remaining_bytes:
+                    buffer.extend(chunk[:max(0, remaining_bytes)])
+                    output_limited = True
+                    _terminate_process_tree(process)
+                    break
+                buffer.extend(chunk)
+            if output_limited:
+                break
+    finally:
+        if output_limited:
+            _terminate_process_tree(process)
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(process)
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+        _close_process_pipes(selector, streams)
+        selector.close()
+
+    return bytes(streams[process.stdout]), bytes(streams[process.stderr]), output_limited
+
+
+def _close_process_pipes(selector: selectors.BaseSelector, streams: dict[Any, bytearray]) -> None:
+    for stream in streams:
+        try:
+            selector.unregister(stream)
+        except (KeyError, ValueError):
+            pass
+        if not stream.closed:
+            stream.close()
 
 
 def _resource_limiter(memory_limit_mb: int | None, file_size_limit_mb: int | None):
@@ -173,6 +289,7 @@ def semgrep_diagnostic() -> dict[str, Any]:
         "version": version,
         "rules_path": str(SEMGREP_RULES),
         "ruleset_hash": ruleset_hash,
+        "output_limit_bytes": PROVIDER_OUTPUT_LIMIT_BYTES,
         "error": "; ".join(missing),
         "required": False,
     }
@@ -200,6 +317,7 @@ def yara_diagnostic() -> dict[str, Any]:
         "version": version,
         "rules_path": str(YARA_RULES),
         "ruleset_hash": ruleset_hash,
+        "output_limit_bytes": PROVIDER_OUTPUT_LIMIT_BYTES,
         "error": "; ".join(missing),
         "required": False,
     }

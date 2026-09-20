@@ -111,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--select", help="Select displayed rows, for example 1,3-5 or all.")
     scan.add_argument("--version", help="Exact Marketplace version; may also be supplied as ID@VERSION.")
     scan.add_argument("--target-platform", help="Exact Marketplace artifact variant, for example darwin-x64.")
-    scan.add_argument("--runtime", action="store_true", help="Run a capability-gated dynamic pass for Marketplace artifacts inside Bubblewrap; non-executable packages are recorded as not applicable.")
+    scan.add_argument("--runtime", action="store_true", help="Run a capability-gated dynamic pass for local, installed, uploaded, or Marketplace artifacts inside Bubblewrap; non-executable packages are recorded as not applicable.")
     scan.add_argument("--runtime-timeout", type=int, default=20, help="Maximum seconds per controlled runtime action (1-300).")
     scan.add_argument(
         "--profile",
@@ -319,7 +319,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
             raise ValueError(f"No extension target was found at {args.file}")
         print(section("Local file target"))
         print(table(["Type", "Path"], [[item.get("type"), item.get("path")] for item in targets], max_widths=[12, 88]))
-        print(color("Scanning the selected local artifact without executing extension code…", "brand_cyan"))
+        if args.runtime or args.profile == "deep":
+            print(color("Scanning the selected local artifact with static analysis and capability-gated Bubblewrap runtime; host execution is never used…", "brand_cyan"))
+        else:
+            print(color("Scanning the selected local artifact without executing extension code…", "brand_cyan"))
         report = run_with_profile(
             args.profile,
             lambda required_providers: scan_paths(
@@ -327,8 +330,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 online=args.online or args.profile == "deep",
                 registry_snapshot=args.registry_snapshot,
                 required_providers=required_providers,
-                dynamic_runtime=args.profile == "deep",
-                runtime_timeout_seconds=20,
+                dynamic_runtime=args.runtime or args.profile == "deep",
+                runtime_timeout_seconds=args.runtime_timeout,
             ),
         )
         source = "file"
@@ -341,6 +344,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
             selected_rows,
             profile=args.profile,
             online=args.online,
+            dynamic_runtime=args.runtime or args.profile == "deep",
+            runtime_timeout_seconds=args.runtime_timeout,
             progress=lambda message: print(color(message, "brand_cyan")),
         )
 

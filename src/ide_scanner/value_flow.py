@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import Any
 
 MAX_VALUE_PROPAGATION_ROUNDS = 32
@@ -10,13 +11,24 @@ _ASSIGNMENT = re.compile(rf"\b(?:const|let|var)\s+(?P<target>{_IDENT})\s*=\s*(?P
 _PROPERTY_ASSIGNMENT = re.compile(
     rf"\b(?P<object>{_IDENT})\s*\.\s*(?P<property>{_IDENT})\s*=\s*(?P<expression>[^;\n]{{1,2000}})"
 )
-_CREDENTIAL_READ = re.compile(
-    r"fs\.(?:promises\.)?(?:readFile|readFileSync)\s*\([^)]*(?:\.ssh|id_(?:rsa|ed25519)|\.aws|\.npmrc|\.git-credentials|wallet|mnemonic|seed.?phrase|[/\\]\.env\b)",
+_CREDENTIAL_PATH_LITERAL = re.compile(
+    r"(?:\.ssh|id_(?:rsa|ed25519)|\.aws|\.npmrc|\.git-credentials|wallet|mnemonic|seed.?phrase|[/\\]\.env\b)",
     re.I,
 )
-_TRANSFORM = re.compile(r"(?:JSON\.stringify|Buffer\.from|createGzip|createCipheriv)\s*\((?P<source>[^)]{1,500})\)")
+_CREDENTIAL_PATH_SOURCE = re.compile(
+    r"(?:process\.env\.[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]*|"
+    r"\.ssh|id_(?:rsa|ed25519)|\.aws|\.npmrc|\.git-credentials|wallet|mnemonic|seed.?phrase|[/\\]\.env\b)",
+    re.I,
+)
+_CREDENTIAL_NAME = re.compile(r"(?:secret|credential|token|password|passwd|private[_-]?key)", re.I)
+_TRANSFORM = re.compile(
+    r"(?:JSON\.stringify|Buffer\.from|createGzip|createCipheriv)\s*"
+    r"\((?P<source>[^)]{1,500})\)"
+    r"(?:\s*\.\s*[A-Za-z_$][\w$]*\s*\([^)]{0,500}\))*"
+)
 _NETWORK_SINKS = (
     re.compile(r"\b(?:request|req)\.write\s*\((?P<value>[^)]{1,500})\)"),
+    re.compile(r"\b(?:https?|http)\.request\s*\([^)]{0,1200}\)\s*\.write\s*\((?P<value>[^)]{1,500})\)", re.S),
     re.compile(r"\baxios\.(?:post|put)\s*\([^,]{1,500},\s*(?P<value>[^)]{1,500})\)"),
     re.compile(r"\bfetch\s*\([^,]{1,500},\s*\{[^}]{0,1000}\bbody\s*:\s*(?P<value>[^,}\n]{1,500})", re.S),
 )
@@ -30,10 +42,23 @@ def credential_value_flow(text: str) -> dict[str, Any] | None:
         (match.group("target"), match.group("expression"), match.start())
         for match in _ASSIGNMENT.finditer(text)
     ]
+    # Generated/minified bundles routinely reuse short identifiers in separate
+    # lexical scopes. A file-wide name map would merge those bindings and can
+    # turn an unrelated readFileSync() into a false source-to-sink lineage.
+    # Keep the high-recall flow for unique bindings, but require an unambiguous
+    # name path before reporting a finding.
+    assignment_counts = Counter(target for target, _, _ in assignments)
+    ambiguous_targets = {target for target, count in assignment_counts.items() if count > 1}
+    credential_path_names = {
+        target
+        for target, expression, _ in assignments
+        if _CREDENTIAL_PATH_SOURCE.search(expression)
+        and (_CREDENTIAL_PATH_LITERAL.search(expression) or _CREDENTIAL_NAME.search(f"{target} {expression}"))
+    }
     functions = _function_summaries(text)
     tainted: dict[str, dict[str, Any]] = {}
     for target, expression, position in assignments:
-        if _CREDENTIAL_READ.search(expression):
+        if _credential_read_expression(expression, credential_path_names):
             tainted[target] = {
                 "source_variable": target,
                 "path": [target],
@@ -88,6 +113,8 @@ def credential_value_flow(text: str) -> dict[str, Any] | None:
             source = _first_tainted_identifier(match.group("value"), tainted, before=match.start())
             if source is not None:
                 flow = tainted[source]
+                if _flow_uses_ambiguous_binding(flow, ambiguous_targets):
+                    continue
                 return {
                     "source_variable": flow["source_variable"],
                     "sink_variable": source,
@@ -109,6 +136,8 @@ def credential_value_flow(text: str) -> dict[str, Any] | None:
             if source is None:
                 continue
             flow = tainted[source]
+            if _flow_uses_ambiguous_binding(flow, ambiguous_targets):
+                continue
             return {
                 "source_variable": flow["source_variable"],
                 "sink_variable": source,
@@ -121,6 +150,25 @@ def credential_value_flow(text: str) -> dict[str, Any] | None:
                 "parameter": summary["parameters"][parameter_index],
             }
     return None
+
+
+def _flow_uses_ambiguous_binding(flow: dict[str, Any], ambiguous_targets: set[str]) -> bool:
+    if not ambiguous_targets:
+        return False
+    names = {str(flow.get("source_variable") or "")}
+    for item in flow.get("path") or []:
+        names.update(re.findall(rf"\b({_IDENT})\b", str(item)))
+    return bool(names & ambiguous_targets)
+
+
+def _credential_read_expression(expression: str, credential_path_names: set[str]) -> bool:
+    read_call = re.search(r"fs\.(?:promises\.)?(?:readFile|readFileSync)\s*\(", expression, re.I)
+    if not read_call:
+        return False
+    if _CREDENTIAL_PATH_SOURCE.search(expression):
+        return True
+    identifiers = set(re.findall(rf"\b{_IDENT}\b", expression[read_call.end():]))
+    return bool(identifiers & credential_path_names)
 
 
 def _first_tainted_identifier(

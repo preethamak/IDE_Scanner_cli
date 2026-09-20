@@ -11,6 +11,7 @@ from unittest.mock import patch
 from guardrails_cli import main as cli
 from guardrails_cli.risk_brief import build_risk_brief
 from guardrails_cli.ui.prompts import prompt_choice
+from guardrails_cli.environment import doctor_checks
 
 
 class GuardrailsCliTests(unittest.TestCase):
@@ -27,6 +28,24 @@ class GuardrailsCliTests(unittest.TestCase):
         self.assertEqual(error, "")
         self.assertIn("Guardrails 0.2.3", output)
 
+    def test_doctor_reports_dynamic_sandbox_readiness(self) -> None:
+        with (
+            patch("guardrails_cli.environment.installed_extensions", return_value=[]),
+            patch("guardrails_cli.environment.analysis_provider_diagnostics", return_value={
+                "semgrep": {"status": "available", "executable": "semgrep", "ruleset_hash": "a" * 64},
+                "yara": {"status": "available", "executable": "yara", "ruleset_hash": "b" * 64},
+            }),
+            patch("guardrails_cli.environment.engine_identity", return_value={"version": "1.0.0", "build": "c" * 40}),
+            patch("guardrails_cli.environment.rules_json", return_value={"ruleset_version": "rules-test", "rules": [{"rule_id": "example"}]}),
+            patch("guardrails_cli.environment.sandbox_preflight", return_value={
+                "status": "unavailable", "error": "namespace permission denied",
+            }),
+        ):
+            checks = doctor_checks()
+
+        self.assertIn(("Dynamic sandbox", "FAIL", "namespace permission denied"), checks)
+        self.assertIn(("Scanner", "OK", "engine 1.0.0 · build cccccccccccc · rules rules-test (1)"), checks)
+
     def test_standard_version_flag_is_supported(self) -> None:
         output = io.StringIO()
         with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
@@ -40,6 +59,11 @@ class GuardrailsCliTests(unittest.TestCase):
         self.assertEqual(error, "")
         self.assertIn("Command map", output)
         self.assertIn("guardrails help shortcuts", output)
+
+        code, output, error = self.run_cli(["help", "scan"])
+        self.assertEqual(code, 0)
+        self.assertEqual(error, "")
+        self.assertIn("local, uploaded, and installed-extension inputs", output)
 
         code, output, error = self.run_cli(["help", "automation"])
         self.assertEqual(code, 0)
@@ -103,7 +127,7 @@ class GuardrailsCliTests(unittest.TestCase):
             patch("guardrails_cli.main.display_report", return_value=report),
             patch("guardrails_cli.main.render_scan_report", return_value="ok"),
         ):
-            code, _output, error = self.run_cli([
+            code, output, error = self.run_cli([
                 "scan",
                 "--marketplace",
                 "sample.extension@1.0.0",
@@ -126,6 +150,39 @@ class GuardrailsCliTests(unittest.TestCase):
             required_providers=frozenset({"semgrep", "yara", "dependency_intelligence"}),
             dynamic_runtime=True,
             runtime_timeout_seconds=20,
+        )
+
+    def test_local_deep_scan_forwards_runtime_contract(self) -> None:
+        report = {"scan_id": "scan-1", "summary": {}, "extensions": []}
+        with (
+            patch("guardrails_cli.main.discover_paths", return_value=[{"type": "vsix", "path": "/tmp/sample.vsix"}]),
+            patch("guardrails_cli.main.scan_paths", return_value=report) as scan,
+            patch("guardrails_cli.main.display_report", return_value=report),
+            patch("guardrails_cli.main.render_scan_report", return_value="ok"),
+        ):
+            code, output, error = self.run_cli([
+                "scan",
+                "--file",
+                "/tmp/sample.vsix",
+                "--profile",
+                "deep",
+                "--runtime-timeout",
+                "37",
+                "--format",
+                "terminal",
+                "--fail-on",
+                "never",
+            ])
+
+        self.assertEqual((code, error), (0, ""))
+        self.assertIn("capability-gated Bubblewrap runtime", output)
+        scan.assert_called_once_with(
+            ["/tmp/sample.vsix"],
+            online=True,
+            registry_snapshot=None,
+            required_providers=frozenset({"semgrep", "yara", "dependency_intelligence"}),
+            dynamic_runtime=True,
+            runtime_timeout_seconds=37,
         )
 
     def test_brief_scans_each_exact_candidate_and_fails_closed_for_review(self) -> None:

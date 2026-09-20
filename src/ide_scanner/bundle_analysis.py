@@ -50,6 +50,7 @@ _ARRAY_PUSH_RE = re.compile(r"(?:\.push|\[\s*['\"]push['\"]\s*\])\s*\(", re.I)
 _ARRAY_SHIFT_RE = re.compile(r"(?:\.shift|\[\s*['\"]shift['\"]\s*\])\s*\(", re.I)
 _ROTATION_WINDOW_BYTES = 4_096
 _ROTATION_CALL_SPAN_BYTES = 256
+_HARVESTING_WINDOW_BYTES = 16_384
 
 
 def analyze_generated_bundle(text: str) -> dict[str, Any]:
@@ -99,6 +100,7 @@ def analyze_generated_bundle(text: str) -> dict[str, Any]:
         and len(credential_families) >= 3
         and {"file-read", "directory-enumeration", "home-directory"}.issubset(collection_signals)
         and {"network-client", "outbound-write", "payload-packaging"}.issubset(exfiltration_signals)
+        and _has_local_harvesting_chain(text)
     )
 
     return {
@@ -153,4 +155,30 @@ def _has_local_array_rotation(text: str) -> bool:
             shift = _ARRAY_SHIFT_RE.search(window, push.end(), call_end)
             if shift is not None and ";" not in window[push.end():shift.start()]:
                 return True
+    return False
+
+
+def _has_local_harvesting_chain(text: str) -> bool:
+    """Require collection and outbound stages to share one bundle-local window.
+
+    A generated AI/editor bundle can legitimately contain provider credential
+    configuration, project-file helpers, telemetry clients, and unrelated
+    third-party libraries. Whole-file co-occurrence of those terms is not a
+    source-to-sink chain. A real harvester must keep the collection and
+    outbound stages close enough to inspect as one module-sized behavior.
+    """
+    home_pattern = _COLLECTION_SIGNALS["home-directory"]
+    for match in home_pattern.finditer(text):
+        start = max(0, match.start() - _HARVESTING_WINDOW_BYTES)
+        end = min(len(text), match.end() + _HARVESTING_WINDOW_BYTES)
+        window = text[start:end]
+        families = [name for name, pattern in _CREDENTIAL_FAMILIES.items() if pattern.search(window)]
+        collection = [name for name, pattern in _COLLECTION_SIGNALS.items() if pattern.search(window)]
+        exfiltration = [name for name, pattern in _EXFILTRATION_SIGNALS.items() if pattern.search(window)]
+        if (
+            len(families) >= 3
+            and {"file-read", "directory-enumeration", "home-directory"}.issubset(collection)
+            and {"network-client", "outbound-write", "payload-packaging"}.issubset(exfiltration)
+        ):
+            return True
     return False

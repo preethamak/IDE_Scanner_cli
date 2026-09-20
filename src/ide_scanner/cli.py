@@ -13,11 +13,11 @@ from .artifact_store import FilesystemArtifactStore
 from .agent import build_agent_report, upload_agent_report
 from .benchmarks.adapters.protect_your_secrets import write_normalized_dataset
 from .benchmarks.runner import run_credential_exposure_benchmark, write_benchmark_bundle
-from .benchmarks.production import evaluate_production_corpus
+from .benchmarks.production import evaluate_holdout_corpus, evaluate_production_corpus
 from .discovery import discover_from_path, discover_local_installations
 from .evidence import location_from_finding
 from .report_bundle import iter_report_events, write_report_bundle
-from .sandbox_runner import run_sandbox
+from .sandbox_runner import run_sandbox, sandbox_preflight
 from .scanner import DEEP_REQUIRED_PROVIDERS, scan_targets
 
 
@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("--extension-advisories", help="Versioned JSON feed of exact extension vulnerability advisories. Defaults to the bundled snapshot.")
     scan.add_argument("--registry-snapshot", help="Replay registry and dependency intelligence captured in an earlier JSON report.")
     scan.add_argument("--sandbox-observations", help="JSON observations from an external sandbox run. The scanner imports this evidence but does not execute extensions.")
-    scan.add_argument("--runtime", action="store_true", help="Run a capability-gated dynamic pass for marketplace artifacts inside Bubblewrap; non-executable packages are recorded as not applicable.")
+    scan.add_argument("--runtime", action="store_true", help="Run a capability-gated dynamic pass for local or marketplace artifacts inside Bubblewrap; low-capability packages are recorded as not applicable.")
     scan.add_argument("--runtime-timeout", type=int, default=15, help="Maximum seconds per controlled runtime action (1-300).")
     scan.add_argument("--previous-report", help="Previous ide-scanner JSON report to compare versions, dependencies, scores, and artifacts.")
     scan.add_argument("--skip-posture", action="store_true", help="Skip local IDE/client posture checks; useful for portable extension corpus scans.")
@@ -76,6 +76,13 @@ def main(argv: list[str] | None = None) -> int:
     sandbox.add_argument("--out", required=True, help="Write sandbox observations JSON to this file.")
     sandbox.add_argument("--allow-execute", action="store_true", help="Execute lifecycle scripts and the activation entrypoint, then probe registered commands and webview messages inside Bubblewrap isolation with networking disabled.")
     sandbox.add_argument("--timeout", type=int, default=15, help="Execution timeout per command in seconds.")
+
+    preflight = subparsers.add_parser(
+        "sandbox-preflight",
+        help="Verify that this worker can create the required isolated runtime namespace.",
+    )
+    preflight.add_argument("--timeout", type=int, default=10, help="Preflight timeout in seconds (1-60).")
+    preflight.add_argument("--out", "--output", dest="output", help="Write the preflight result to this file.")
 
     benchmark = subparsers.add_parser("benchmark", help="Run scanner benchmarks.")
     benchmark_subparsers = benchmark.add_subparsers(dest="benchmark_command")
@@ -106,6 +113,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Exit non-zero when any required production gate fails.",
     )
 
+    benchmark_holdout = benchmark_subparsers.add_parser(
+        "holdout",
+        help="Evaluate a frozen exact-artifact holdout against a deep runtime corpus report.",
+    )
+    benchmark_holdout.add_argument("--corpus", required=True, help="Frozen labelled holdout corpus JSON.")
+    benchmark_holdout.add_argument("--report", required=True, help="Runtime-enabled corpus scan report JSON or report.zip.")
+    benchmark_holdout.add_argument("--out", "--output", dest="output", help="Write the holdout gate result as JSON.")
+    benchmark_holdout.add_argument(
+        "--allow-static-only",
+        action="store_true",
+        help="Do not require the report to prove runtime-enabled deep scanning (for offline calibration only).",
+    )
+    benchmark_holdout.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        help="Exit non-zero when the holdout gate fails.",
+    )
+
     agent = subparsers.add_parser("agent", help="Run a local scan and upload the report to ide-scanner-web.")
     agent.add_argument("--server", required=True, help="Base URL of the web app, for example http://127.0.0.1:8765.")
     agent.add_argument("--token", help="Bearer token for the web app. Defaults to IDE_SCANNER_AGENT_TOKEN.")
@@ -134,6 +159,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("scan --artifact-url and --artifact-sha256 must be provided together")
         if not 1 <= args.runtime_timeout <= 300:
             parser.error("scan --runtime-timeout must be between 1 and 300 seconds")
+        if args.profile == "deep" and not args.runtime:
+            parser.error("scan --profile deep requires --runtime; use standard for static-only scans")
         report = scan_targets(
             paths=[Path(item) for item in args.path],
             marketplace_scan_ids=args.extension_id,
@@ -219,9 +246,23 @@ def main(argv: list[str] | None = None) -> int:
         observations = run_sandbox(Path(args.path), allow_execute=args.allow_execute, timeout_seconds=args.timeout)
         _emit(observations, args.out)
         return 0
+    if args.command == "sandbox-preflight":
+        if not 1 <= args.timeout <= 60:
+            parser.error("sandbox-preflight --timeout must be between 1 and 60 seconds")
+        result = sandbox_preflight(args.timeout)
+        _emit(result, args.output)
+        return 0 if result.get("status") == "ready" else 2
     if args.command == "benchmark":
         if args.benchmark_command == "production":
             result = evaluate_production_corpus(args.corpus, args.report)
+            _emit(result, args.output)
+            return 1 if args.fail_on_regression and not result["gate"]["passed"] else 0
+        if args.benchmark_command == "holdout":
+            result = evaluate_holdout_corpus(
+                args.corpus,
+                args.report,
+                require_runtime=not args.allow_static_only,
+            )
             _emit(result, args.output)
             return 1 if args.fail_on_regression and not result["gate"]["passed"] else 0
         if args.benchmark_command == "run":

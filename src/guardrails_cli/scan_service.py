@@ -16,6 +16,8 @@ def scan_installed(
     *,
     profile: str = "standard",
     online: bool = False,
+    dynamic_runtime: bool = False,
+    runtime_timeout_seconds: int = 20,
     progress: ProgressCallback | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Scan selected installations and return raw and presentation reports."""
@@ -31,6 +33,8 @@ def scan_installed(
                 [row["path"] for row in snapshot_rows],
                 online=online or profile == "deep",
                 required_providers=required_providers,
+                dynamic_runtime=dynamic_runtime or profile == "deep",
+                runtime_timeout_seconds=runtime_timeout_seconds,
             ),
         )
         attach_installation_context(report, snapshot_rows)

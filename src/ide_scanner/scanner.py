@@ -57,7 +57,7 @@ from .rule_registry import RULESET_VERSION
 from .posture import scan_posture, summarize_posture
 from .providers import run_static_providers
 from .providers.runtime import SEMGREP_MAX_TARGET_BYTES, run_bounded_process
-from .sandbox_runner import run_sandbox
+from .sandbox_runner import external_trace_available, run_sandbox
 from .registry import (
     MarketplaceDownloadError,
     _degzip_if_needed,
@@ -101,6 +101,11 @@ EXEC_TEXT_EXTS = {".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ps1", ".py", 
 DOCUMENTATION_PREVIEW_EXTS = {".md", ".markdown", ".rst"}
 BINARY_RISK_EXTS = {".dll", ".dylib", ".exe", ".node", ".so"}
 PACKED_RISK_EXTS = {".7z", ".asar", ".gz", ".jar", ".rar", ".tar", ".tgz", ".war", ".zip"}
+WASM_LOADER_RE = re.compile(
+    r"\bWebAssembly\.(?:instantiate|instantiateStreaming|compile|compileStreaming|Module)\b"
+    r"|(?:readFile(?:Sync)?|fetch|request|arrayBuffer)\s*\([^\n]{0,500}\.wasm\b",
+    re.I,
+)
 DEEP_REQUIRED_PROVIDERS = frozenset({"semgrep", "yara", "dependency_intelligence"})
 ARTIFACT_ORIGINS = frozenset({"user_uploaded_vsix", "installed_directory", "local_directory", "archive_artifact", "source_snapshot"})
 SKIP_DIRS = {".git", ".hg", ".svn"}
@@ -121,7 +126,13 @@ MAX_ARCHIVE_FILES = 100_000
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_ARCHIVE_COMPRESSION_RATIO = 100
 SHA256_RE = re.compile(r"\b[a-fA-F0-9]{64}\b")
-CONFIRMED_RULES = {"known-bad-artifact", "marketplace-removed-malware", "malicious-npm-dependency", "trusted-threat-feed-hit"}
+CONFIRMED_RULES = {
+    "known-bad-artifact",
+    "known-malicious-extension",
+    "marketplace-removed-malware",
+    "malicious-npm-dependency",
+    "trusted-threat-feed-hit",
+}
 OBSERVED_RULES = {
     "observed-secret-exfil",
     "observed-download-execute",
@@ -146,7 +157,19 @@ CORRELATED_RULES = {
     "obfuscated-credential-harvesting-exfiltration",
     "supply-chain-dropper-chain",
 }
-BLOCKING_CORRELATED_RULES = CORRELATED_RULES - {"download-and-execute"}
+# A remote extension update without visible integrity verification is a serious
+# supply-chain review signal, but legitimate extension managers use this shape.
+# Destructive archive/upload workflows and local command servers are also common
+# in backup, deployment, and IDE tooling. Keep those chains high-risk and
+# reviewable, but do not turn static capability evidence into a preventive block
+# without observed behavior, authoritative intelligence, or a separate
+# high-specificity data-theft chain.
+BLOCKING_CORRELATED_RULES = CORRELATED_RULES - {
+    "download-and-execute",
+    "remote-vsix-install-chain",
+    "destructive-transfer-chain",
+    "persistence-chain",
+}
 BLOCKING_OBSERVED_RULES = {
     "observed-destructive-behavior",
     "observed-download-execute",
@@ -154,12 +177,13 @@ BLOCKING_OBSERVED_RULES = {
     "observed-secret-exfil",
 }
 DOWNLOAD_EXECUTE_CREDENTIAL_SIGNALS = {
-    "credential-command-control",
-    "credential-config-key",
-    "credential-config-update",
-    "credential-global-state-key",
-    "credential-global-state-storage",
-    "credential-inputbox-prompt",
+    "credential-dataflow-to-file",
+    "credential-dataflow-to-network",
+    "credential-dataflow-to-process",
+    "credential-exfiltration-chain",
+    "credential-harvesting-exfiltration",
+    "credential-identifier-flow-to-network",
+    "obfuscated-credential-harvesting-exfiltration",
 }
 CAPABILITY_RULES = {
     "agent-filesystem-tool",
@@ -167,7 +191,6 @@ CAPABILITY_RULES = {
     "agent-prompt-injection-sink",
     "agent-shell-tool",
     "agentic-tooling",
-    "ast-dynamic-call-target",
     "ast-bracket-notation-sensitive-access",
     "ast-constructed-dynamic-argument",
     "broad-activation",
@@ -182,6 +205,7 @@ CAPABILITY_RULES = {
     "lifecycle-script",
     "mcp-server-command",
     "native-or-packed-artifact",
+    "wasm-loader",
     "powerful-ide-contribution",
     "sensitive-activation",
     "startup-activation",
@@ -230,6 +254,7 @@ EXPOSURE_RULES = {
     "credential-global-state-key",
     "credential-global-state-storage",
     "credential-inputbox-prompt",
+    "remote-credential-broker",
     "clipboard-read-near-secret-input",
     "clipboard-near-credential-surface",
     "credential-input-near-state",
@@ -346,7 +371,8 @@ def _scan_request(
         unique[target["path"]] = target
 
     known_bad_hashes = _load_known_bad_hashes(request.known_bad_hashes_file)
-    extensions = _scan_discovered_targets(list(unique.values()), known_bad_hashes, jobs=jobs)
+    local_targets = list(unique.values())
+    extensions = _scan_discovered_targets(local_targets, known_bad_hashes, jobs=jobs)
     extensions.extend(_registry_only_extension(extension_id) for extension_id in request.extension_ids)
     runtime_bundle: dict[str, Any] = {
         "schema_version": "0.1.0",
@@ -354,7 +380,16 @@ def _scan_request(
         "extensions": {},
         "runs": [],
         "required_extension_ids": [],
+        "external_syscall_trace": False,
+        "external_syscall_trace_available": external_trace_available(),
     }
+    if request.dynamic_runtime and local_targets:
+        _apply_local_dynamic_runtime(
+            local_targets,
+            extensions[:len(local_targets)],
+            runtime_bundle,
+            request.runtime_timeout_seconds,
+        )
     for identifier in request.marketplace_scan_ids:
         extensions.append(scan_marketplace_extension(
             identifier,
@@ -953,15 +988,22 @@ def _scan_discovered_targets(
         return []
     if jobs <= 1 or len(targets) == 1:
         return [_scan_discovered_target(target, known_bad_hashes) for target in targets]
-    with ProcessPoolExecutor(max_workers=min(jobs, len(targets))) as executor:
-        return list(
-            executor.map(
-                _scan_discovered_target,
-                targets,
-                repeat(known_bad_hashes),
-                chunksize=1,
+    try:
+        with ProcessPoolExecutor(max_workers=min(jobs, len(targets))) as executor:
+            return list(
+                executor.map(
+                    _scan_discovered_target,
+                    targets,
+                    repeat(known_bad_hashes),
+                    chunksize=1,
+                )
             )
-        )
+    except PermissionError:
+        # Some managed runtimes deny the forkserver socket even though the
+        # per-artifact scanners and their provider subprocesses are usable.
+        # Preserve a truthful scan by retrying sequentially; this is a
+        # capacity fallback, not a relaxation of analysis or isolation.
+        return [_scan_discovered_target(target, known_bad_hashes) for target in targets]
 
 
 def _local_error_extension(path: Path, source: str, message: str) -> ExtensionReport:
@@ -976,13 +1018,23 @@ def _local_error_extension(path: Path, source: str, message: str) -> ExtensionRe
         "manifest_validation": {"valid": False, "status": "scan-aborted"},
         "providers": {},
     }
-    name = path.name or "unknown"
+    # Preserve trustworthy local identity even when the isolated worker dies
+    # before it can produce a normal report. This is deliberately bounded and
+    # manifest-only: it never turns a failed scan into a successful one and
+    # does not inspect executable code on the failure path.
+    manifest, _manifest_status = _read_manifest_status(path / "package.json") if path.is_dir() else ({}, "missing")
+    publisher = str(manifest.get("publisher") or "").strip()
+    package_name = str(manifest.get("name") or "").strip()
+    version = str(manifest.get("version") or "").strip()
+    identity = f"{publisher}.{package_name}" if publisher and package_name else ""
+    name = package_name or path.name or "unknown"
+    extension_id = identity or f"unknown.{name}"
     return ExtensionReport(
         instance_id=_stable_id(str(path)),
-        extension_id=f"unknown.{name}",
+        extension_id=extension_id,
         name=name,
-        publisher="unknown",
-        version="unknown",
+        publisher=publisher or "unknown",
+        version=version or "unknown",
         description="",
         repository="",
         install_path=str(path),
@@ -1005,28 +1057,162 @@ def _local_error_extension(path: Path, source: str, message: str) -> ExtensionRe
 
 
 _DYNAMIC_RUNTIME_CAPABILITIES = frozenset({
-    "activation",
     "agentic",
     "credential_commands",
     "credential_configuration",
     "credential_input",
     "dynamic_code",
-    "filesystem",
-    "ide_contributions",
     "lifecycle_scripts",
+    "native_code",
     "network",
     "process_execution",
+    "wasm_runtime",
 })
 
 
 def _runtime_required_for_report(report: ExtensionReport) -> bool:
-    """Apply the runtime policy without treating themes as executable code."""
+    """Require dynamic coverage only when it can answer a security question.
+
+    A VS Code extension can have a JavaScript activation entrypoint without
+    requesting sensitive powers. Running every such entrypoint in the sandbox
+    creates noise and incorrectly treats ordinary themes, UI helpers, and
+    similarly low-power packages as runtime-required. Static analysis still
+    covers their executable files; the dynamic provider records them as
+    ``not-applicable`` under the capability policy.
+
+    Sensitive capabilities remain runtime-required even when no activation
+    entrypoint is declared, which covers native/WASM payloads and lifecycle
+    behavior discovered from the package. This is deliberately capability
+    based rather than name based: a theme carrying a hidden native payload or
+    network/process behavior still enters the required runtime path.
+    """
     capability_ids = {
         str(item.get("id") or "")
         for item in report.capabilities
         if isinstance(item, dict)
     }
     return bool(capability_ids & _DYNAMIC_RUNTIME_CAPABILITIES)
+
+
+def _finalize_runtime_trace_metadata(runtime_bundle: dict[str, Any]) -> None:
+    """Summarize actual trace evidence without confusing it with availability."""
+    runs = runtime_bundle.get("runs") if isinstance(runtime_bundle.get("runs"), list) else []
+    required_runs = [
+        item for item in runs
+        if isinstance(item, dict) and item.get("required") is True
+    ]
+    runtime_bundle["external_syscall_trace"] = bool(
+        required_runs
+        and all(item.get("external_syscall_trace") is True for item in required_runs)
+    )
+
+
+def _runtime_execution_failure(runtime: dict[str, Any], items: list[dict[str, Any]]) -> str:
+    """Explain when a required runtime pass did not execute an artifact path.
+
+    Native/WASM and lifecycle capabilities can make runtime coverage required
+    even when the package has no Node activation entrypoint. The sandbox still
+    returns a valid plan in that case, but a plan-only result must not be
+    mistaken for executed coverage. A successful lifecycle action is a valid
+    execution path; otherwise the required provider is incomplete.
+    """
+    plan = runtime.get("plan") if isinstance(runtime.get("plan"), dict) else {}
+    instrumentation = plan.get("instrumentation") if isinstance(plan.get("instrumentation"), dict) else {}
+    entrypoint_status = str(instrumentation.get("entrypoint_status") or "")
+    if entrypoint_status != "not-applicable":
+        return ""
+    lifecycle_executed = any(
+        isinstance(item, dict)
+        and item.get("kind") == "lifecycle_executed"
+        and item.get("returncode") == 0
+        for item in items
+    )
+    if lifecycle_executed:
+        return ""
+    return (
+        "Required runtime coverage had no declared Node activation entrypoint "
+        "and did not complete a lifecycle execution path."
+    )
+
+
+def _apply_local_dynamic_runtime(
+    targets: list[dict[str, str]],
+    extensions: list[ExtensionReport],
+    runtime_bundle: dict[str, Any],
+    timeout_seconds: int,
+) -> None:
+    """Run the same capability-gated sandbox for local VSIX and directory inputs.
+
+    Marketplace scans already use this path in ``scan_marketplace_extension``.
+    Keeping local artifacts on the same runtime path prevents ``--runtime`` from
+    being a misleading no-op for uploaded VSIX files and installed extensions.
+    """
+    for target, report in zip(targets, extensions, strict=False):
+        required = _runtime_required_for_report(report)
+        run_record: dict[str, Any] = {
+            "extension_id": report.extension_id,
+            "version": report.version,
+            "required": required,
+            "artifact_sha256": report.artifact_hash,
+            "status": "not-applicable" if not required else "failed",
+            "external_syscall_trace": False,
+        }
+        if required:
+            runtime_bundle.setdefault("required_extension_ids", []).append(report.extension_id)
+            try:
+                runtime = run_sandbox(
+                    Path(target["path"]),
+                    allow_execute=True,
+                    timeout_seconds=timeout_seconds,
+                )
+                observed = runtime.get("extensions", {}) if isinstance(runtime, dict) else {}
+                items = observed.get(report.extension_id, []) if isinstance(observed, dict) else []
+                if not isinstance(items, list):
+                    items = []
+                runtime_failed = any(
+                    isinstance(item, dict)
+                    and str(item.get("kind") or "") in {"runtime_timeout", "sandbox_error"}
+                    for item in items
+                )
+                execution_error = _runtime_execution_failure(runtime, items) if required else ""
+                if execution_error:
+                    items.append({
+                        "kind": "sandbox_error",
+                        "phase": "runtime",
+                        "evidence": execution_error,
+                    })
+                    runtime_failed = True
+                runtime_bundle.setdefault("extensions", {})[report.extension_id] = [
+                    item for item in items if isinstance(item, dict)
+                ]
+                run_record.update({
+                    "status": "failed" if runtime_failed else "completed",
+                    "mode": runtime.get("mode") if isinstance(runtime, dict) else "executed",
+                    "observation_count": len(items),
+                })
+                if isinstance(runtime, dict):
+                    plan = runtime.get("plan") if isinstance(runtime.get("plan"), dict) else {}
+                    instrumentation = plan.get("instrumentation") if isinstance(plan.get("instrumentation"), dict) else {}
+                    trace = instrumentation.get("external_syscall_trace")
+                    trace_available = (
+                        isinstance(trace, dict)
+                        and trace.get("requested") is True
+                        and trace.get("available") is True
+                    )
+                    if trace_available:
+                        runtime_bundle["external_syscall_trace_available"] = True
+                    run_record["external_syscall_trace"] = bool(trace_available and not runtime_failed)
+                if runtime_failed:
+                    run_record["error"] = execution_error or "Runtime execution did not complete successfully."
+            except Exception as exc:  # noqa: BLE001 - runtime failure is disclosed and fail-closed
+                runtime_bundle.setdefault("extensions", {})[report.extension_id] = [{
+                    "kind": "sandbox_error",
+                    "phase": "runtime",
+                    "evidence": str(exc)[:500],
+                }]
+                run_record["error"] = str(exc)[:500]
+        runtime_bundle.setdefault("runs", []).append(run_record)
+        _finalize_runtime_trace_metadata(runtime_bundle)
 
 
 def scan_marketplace_extension(
@@ -1085,6 +1271,7 @@ def scan_marketplace_extension(
                 "required": runtime_required,
                 "artifact_sha256": report.artifact_hash,
                 "status": "not-applicable" if not runtime_required else "failed",
+                "external_syscall_trace": False,
             }
             if runtime_required:
                 runtime_bundle.setdefault("required_extension_ids", []).append(report.extension_id)
@@ -1098,14 +1285,41 @@ def scan_marketplace_extension(
                     items = observed.get(report.extension_id, []) if isinstance(observed, dict) else []
                     if not isinstance(items, list):
                         items = []
+                    runtime_failed = any(
+                        isinstance(item, dict)
+                        and str(item.get("kind") or "") in {"runtime_timeout", "sandbox_error"}
+                        for item in items
+                    )
+                    execution_error = _runtime_execution_failure(runtime, items) if runtime_required else ""
+                    if execution_error:
+                        items.append({
+                            "kind": "sandbox_error",
+                            "phase": "runtime",
+                            "evidence": execution_error,
+                        })
+                        runtime_failed = True
                     runtime_bundle.setdefault("extensions", {})[report.extension_id] = [
                         item for item in items if isinstance(item, dict)
                     ]
                     run_record.update({
-                        "status": "completed",
+                        "status": "failed" if runtime_failed else "completed",
                         "mode": runtime.get("mode") if isinstance(runtime, dict) else "executed",
                         "observation_count": len(items),
                     })
+                    if isinstance(runtime, dict):
+                        plan = runtime.get("plan") if isinstance(runtime.get("plan"), dict) else {}
+                        instrumentation = plan.get("instrumentation") if isinstance(plan.get("instrumentation"), dict) else {}
+                        trace = instrumentation.get("external_syscall_trace")
+                        trace_available = (
+                            isinstance(trace, dict)
+                            and trace.get("requested") is True
+                            and trace.get("available") is True
+                        )
+                        if trace_available:
+                            runtime_bundle["external_syscall_trace_available"] = True
+                        run_record["external_syscall_trace"] = bool(trace_available and not runtime_failed)
+                    if runtime_failed:
+                        run_record["error"] = execution_error or "Runtime execution did not complete successfully."
                 except Exception as exc:  # noqa: BLE001 - runtime failures become disclosed provider evidence
                     runtime_bundle.setdefault("extensions", {})[report.extension_id] = [{
                         "kind": "sandbox_error",
@@ -1114,6 +1328,7 @@ def scan_marketplace_extension(
                     }]
                     run_record["error"] = str(exc)[:500]
             runtime_bundle.setdefault("runs", []).append(run_record)
+            _finalize_runtime_trace_metadata(runtime_bundle)
     except ArtifactStoreError as exc:
         return _marketplace_error_extension(resolved_id, f"Downloaded VSIX could not be preserved: {exc}")
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
@@ -1875,6 +2090,52 @@ def _add_artifact_inventory_findings(
             {"kind": "packed", "count": len(packed_artifacts), "artifacts": _artifact_evidence(packed_artifacts)},
         ))
 
+    # WebAssembly is executable code even when it is opaque to the JavaScript
+    # text analyzers. Treat the presence of a module as a runtime capability,
+    # not as malware evidence. A separate contextual finding is emitted only
+    # when an executable text file visibly instantiates or loads the module;
+    # this catches loader-style supply-chain payloads without flagging every
+    # legitimate language tool that ships WASM.
+    wasm_paths = [
+        str(item.get("path"))
+        for item in artifact_inventory.get("_all_file_hashes", [])
+        if isinstance(item, dict) and str(item.get("path") or "").lower().endswith(".wasm")
+    ]
+    if wasm_paths:
+        capabilities.setdefault("wasm_runtime", {"id": "wasm_runtime", "evidence": []})["evidence"].extend(wasm_paths[:20])
+        loader_paths: list[str] = []
+        if path is not None:
+            candidates = [
+                item for item in artifact_inventory.get("_all_file_hashes", [])
+                if isinstance(item, dict)
+                and str(item.get("path") or "").lower().rsplit(".", 1)[-1] in {"js", "cjs", "mjs", "ts", "tsx", "jsx"}
+                and int(item.get("size_bytes") or 0) <= MAX_TEXT_BYTES
+            ]
+            for item in candidates[:2_000]:
+                rel = str(item.get("path") or "")
+                text = _read_text(path / rel)
+                if text and WASM_LOADER_RE.search(text):
+                    loader_paths.append(rel)
+                    if len(loader_paths) >= 20:
+                        break
+        if loader_paths:
+            findings.append(_finding(
+                extension_id,
+                version,
+                "wasm-loader",
+                "artifact",
+                "MEDIUM",
+                0.65,
+                f"Extension ships {len(wasm_paths)} WebAssembly module(s) and executable code that loads or instantiates one.",
+                sorted(set(wasm_paths[:20] + loader_paths)),
+                "Require the controlled runtime pass and verify the module's origin, imports, and any network or process behavior before approval.",
+                {
+                    "wasm_files": wasm_paths[:20],
+                    "loader_files": loader_paths,
+                    "loader_detection": "visible-WebAssembly-instantiation-or-wasm-load",
+                },
+            ))
+
     matches = _known_bad_matches(artifact_inventory, known_bad_hashes)
     if matches:
         artifact_inventory["known_bad_matches"] = matches
@@ -1927,6 +2188,7 @@ def _add_code_findings(
     has_encode = bool(ENCODE_ARCHIVE_RE.search(text))
     has_destructive = bool(DESTRUCTIVE_RE.search(text))
     has_download = bool(DOWNLOAD_RE.search(text))
+    has_content_download = _has_content_download(text)
     has_obfuscation = bool(re.search(r"(atob\(|buffer\.from\([^)]*,\s*['\"]base64['\"]|fromcharcode|\\x[0-9a-f]{2})", text, re.I))
     has_dynamic_exec = bool(_DYNAMIC_EVAL_RE.search(text))
     has_exec_file = bool(re.search(r"\b(?:execFile|execFileSync)\s*\(", text)) or bool(
@@ -1936,11 +2198,11 @@ def _add_code_findings(
     has_configured_cli = has_exec_file and bool(re.search(r"getConfiguration\(|config\.get\(|executablePath|cliPath", text))
     has_editor_input = bool(re.search(r"activeTextEditor|document\.getText|selection|workspace\.workspaceFolders|uri\.fsPath|fileName", text))
     has_persistence = bool(re.search(r"(\.bashrc|\.zshrc|\.profile|crontab|launchagents|runonce|scheduledtask|systemd|update_rc|startup\s*folder)", text, re.I))
-    has_remote_vsix_install = bool(re.search(
+    remote_vsix_install_re = re.compile(
         r"(?:workbench\.extensions\.installExtension|commands\.executeCommand\s*\(\s*['\"]workbench\.extensions\.installExtension)",
-        text,
         re.I,
-    ))
+    )
+    has_remote_vsix_install = bool(remote_vsix_install_re.search(text))
     has_integrity_verification = has_integrity_gate(text)
     # A standalone "mcp" token is common in documentation, error messages, and
     # word lists. Require an actual agent API or protocol identifier before using
@@ -1950,6 +2212,18 @@ def _add_code_findings(
         text,
         re.I,
     ))
+    remote_broker_re = re.compile(
+        r"\b(?:tokenServerUrl|remoteTokenServerUrl|remoteTokenServer|lease-token|report-result|remote-token)\b",
+        re.I,
+    )
+    token_material_re = re.compile(
+        r"\b(?:refreshToken|refresh_token|accessToken|access_token|tokenServerSecret|tokenInfo)\b",
+        re.I,
+    )
+    bearer_forward_re = re.compile(
+        r"(?:\b(?:authorization|Authorization)\b.{0,160}\bBearer\b|\bBearer\b.{0,160}\b(?:authorization|Authorization)\b)",
+        re.I | re.S,
+    )
     secret_regex = _combined_secret_regex(secret_refs)
 
     identifier_credential_flow = credential_value_flow(text)
@@ -1992,7 +2266,18 @@ def _add_code_findings(
             },
         ))
 
-    if has_remote_vsix_install and has_download and has_file_write and not has_integrity_verification:
+    # Generated bundles routinely contain a generic fetch helper, workspace
+    # writes, and a user-confirmed `installExtension` command in unrelated
+    # modules.  File-wide co-occurrence turned that shape into a high-severity
+    # updater finding (for example Red Hat YAML), even though no VSIX ever
+    # crossed the three stages.  Require the three legs to be locally connected
+    # around the install sink; the directed module-flow pass handles genuinely
+    # split updater implementations separately.
+    has_connected_remote_vsix_install = _features_nearby(
+        text,
+        [remote_vsix_install_re, DOWNLOAD_RE, FILE_WRITE_RE],
+    )
+    if has_connected_remote_vsix_install and not has_integrity_verification:
         findings.append(_finding(
             extension_id,
             version,
@@ -2002,7 +2287,7 @@ def _add_code_findings(
             0.9,
             "Code downloads a VSIX, writes it locally, and invokes the IDE extension installer without visible integrity verification.",
             [rel],
-            "Block silent remote extension installation or require an independently trusted signature/hash and explicit user approval.",
+            "Review the download source and require an independently trusted signature/hash plus explicit user approval before installation.",
             {
                 "evidence_class": "correlated",
                 "correlation": "same-file-semantic-chain",
@@ -2173,17 +2458,23 @@ def _add_code_findings(
             [rel],
             "Require a product reason and user-visible flow for reading credential files.",
         ))
-    if secret_refs and has_file_read and has_network and _features_nearby(text, [secret_regex, FILE_READ_RE, NETWORK_SINK_RE]):
+    # Credential text, a file read, and a network call in one source file are
+    # common in legitimate authenticated clients and bundled agent tools. A
+    # verdict-driving exfiltration chain requires the value itself to reach the
+    # network sink; proximity remains a separate exposure note below.
+    direct_credential_network_flow = bool(identifier_credential_flow) or _has_direct_credential_network_flow(text, secret_regex)
+    if secret_refs and has_file_read and has_network and direct_credential_network_flow:
         findings.append(_finding(
             extension_id,
             version,
             "credential-exfiltration-chain",
             "credential-access",
             "HIGH",
-            0.9,
-            "Code combines credential references, local file reads, and outbound network writes.",
+            0.94,
+            "A credential-file value reaches an outbound network write through a bounded local data flow.",
             [rel],
-            "Remove or block this extension until the data flow is manually verified.",
+            "Verify the exact credential source, destination, and user-authorized purpose before allowing the extension.",
+            {"evidence_class": "correlated", "correlation": "proven-local-value-flow"},
         ))
     if has_destructive and has_encode and has_network and _features_nearby(text, [DESTRUCTIVE_RE, ENCODE_ARCHIVE_RE, NETWORK_SINK_RE]):
         findings.append(_finding(
@@ -2245,10 +2536,33 @@ def _add_code_findings(
             "Review agent tool data boundaries. Proximity alone does not establish that sensitive data reaches the network.",
             {"evidence_class": "exposure", "correlation": "character-proximity"},
         ))
-    if has_download and any(item.rule_id == "process-execution" and rel in item.file_refs for item in findings) and _features_nearby(text, [
-        DOWNLOAD_RE,
-        process_exec_re,
-    ]):
+    if (
+        has_network
+        and remote_broker_re.search(text)
+        and token_material_re.search(text)
+        and bearer_forward_re.search(text)
+    ):
+        findings.append(_finding(
+            extension_id,
+            version,
+            "remote-credential-broker",
+            "cross-extension-exposure",
+            "HIGH",
+            0.84,
+            "Code appears to obtain or forward bearer tokens through a separately configured remote token broker.",
+            [rel],
+            "Verify endpoint ownership, token scope, retention, and user disclosure. This is a trust-boundary review signal, not proof of exfiltration or malicious intent.",
+            {
+                "evidence_class": "exposure",
+                "correlation": "same-file-semantic-chain",
+                "signals": ["remote-token-endpoint", "token-material", "bearer-forwarding", "network-sink"],
+            },
+        ))
+    if (
+        has_content_download
+        and any(item.rule_id == "process-execution" and rel in item.file_refs for item in findings)
+        and _has_download_execute_chain(text, process_exec_re)
+    ):
         findings.append(_finding(
             extension_id,
             version,
@@ -2374,6 +2688,123 @@ _SHELL_EXEC_RE = re.compile(
     r"\bshell\s*:\s*true"
     r"|(?:\b(?:child_process|cp)\b|require\s*\(\s*['\"](?:node:)?child_process['\"]\s*\))\s*\.\s*exec(?:Sync)?\s*\("
 )
+
+# A request API is not automatically a download. Connectivity probes and
+# proxy negotiation commonly use ``http[s].request`` with HEAD/CONNECT and may
+# sit next to legitimate local ``execSync`` calls. Only treat content-oriented
+# requests as the download leg of the download-and-execute chain; the broader
+# DOWNLOAD_RE remains available for lower-level updater/install correlation.
+#
+# Do not match ``curl``/``wget`` as free text. Extensions often show a
+# user-copied installation command in a notification or README; that is not
+# the extension executing a downloader. Those commands are handled separately
+# only when they are the literal command of a child-process invocation.
+_CONTENT_DOWNLOAD_RE = re.compile(
+    r"(?:\bfetch\s*\(|\bhttps?\.get\s*\(|\baxios\.get\s*\()",
+    re.I,
+)
+_REQUEST_CALL_RE = re.compile(r"\bhttps?\.request\s*\(", re.I)
+_REQUEST_METHOD_RE = re.compile(r"\bmethod\s*:\s*['\"]([A-Za-z]+)['\"]", re.I)
+_DOWNLOADER_PROCESS_RE = re.compile(
+    r"\b(?:exec|execSync|execFile|execFileSync|spawn|spawnSync)\s*\(\s*['\"](?:curl|wget)(?:['\"]|\s)",
+    re.I,
+)
+_DIRECT_DOWNLOAD_EXEC_RE = re.compile(
+    r"\b(?:exec|execSync)\s*\(\s*['\"][^'\"]{0,500}\b(?:curl|wget)\b[^'\"]*\|\s*(?:ba)?sh\b",
+    re.I,
+)
+
+
+def _content_download_offsets(text: str) -> list[int]:
+    offsets: list[int] = []
+    for match in _CONTENT_DOWNLOAD_RE.finditer(text):
+        # fetch() is frequently used for POST telemetry or health checks. An
+        # explicit non-GET method is not a content download leg.
+        if match.group(0).lower().startswith("fetch"):
+            window = text[match.start(): match.start() + 1200]
+            method = _REQUEST_METHOD_RE.search(window)
+            if method is not None and method.group(1).upper() != "GET":
+                continue
+        offsets.append(match.start())
+    for match in _REQUEST_CALL_RE.finditer(text):
+        # Bound the lookahead so a later unrelated object cannot relabel a
+        # connectivity request. An omitted method is the Node default GET.
+        window = text[match.start(): match.start() + 1200]
+        method = _REQUEST_METHOD_RE.search(window)
+        if method is None or method.group(1).upper() == "GET":
+            offsets.append(match.start())
+    return offsets
+
+
+def _has_content_download(text: str) -> bool:
+    return bool(_content_download_offsets(text) or _DOWNLOADER_PROCESS_RE.search(text))
+
+
+def _call_end(text: str, opening_parenthesis: int) -> int | None:
+    """Return the matching close parenthesis for a bounded source call."""
+    depth = 0
+    quote = ""
+    escaped = False
+    for index in range(opening_parenthesis, len(text)):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _has_download_execute_chain(text: str, process_exec_re: re.Pattern[str]) -> bool:
+    """Require an actual downloader leg to be near a distinct process sink.
+
+    This intentionally does not treat a POST fetch, a health check, or a
+    user-facing ``curl | bash`` string as a download-and-execute chain. The
+    standalone rule remains review-only, but its evidence still needs to be
+    specific enough to be useful to an analyst.
+    """
+    process_matches = list(process_exec_re.finditer(text))
+    if not process_matches:
+        return False
+    window_chars = max(45 * 72, 240)
+    for anchor in _content_download_offsets(text):
+        opening_parenthesis = text.find("(", anchor)
+        call_end = _call_end(text, opening_parenthesis) if opening_parenthesis >= 0 else None
+        for process in process_matches:
+            if process.start() < anchor or process.start() > anchor + window_chars:
+                continue
+            # The strongest shape is a process sink in the request callback,
+            # e.g. https.get(url, response => execFile(...)).
+            if call_end is not None and process.start() <= call_end:
+                return True
+            # A promise/response handoff is also meaningful, unlike a health
+            # check followed by an unrelated process call elsewhere in the
+            # file. Keep this list deliberately narrow and explainable.
+            handoff = text[call_end + 1 if call_end is not None else anchor: process.start()]
+            if re.search(r"\b(?:then|arrayBuffer|text|json|body|pipe|writeFile|createWriteStream)\b", handoff, re.I):
+                return True
+    direct = _DIRECT_DOWNLOAD_EXEC_RE.search(text)
+    if direct is not None:
+        return True
+    for downloader in _DOWNLOADER_PROCESS_RE.finditer(text):
+        if any(
+            process.start() != downloader.start()
+            and abs(downloader.start() - process.start()) <= window_chars
+            for process in process_matches
+        ):
+            return True
+    return False
 
 # Execution sinks for credential-dataflow-to-process: real process execution (above) or
 # dynamic code evaluation. Used with a proximity gate against credential source surfaces.
@@ -2981,9 +3412,13 @@ def _load_threat_feed(path: Path | str | None = None) -> dict[str, dict[str, Any
     if not raw_path:
         return {}
     try:
-        parsed = json.loads(Path(raw_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+        raw = Path(raw_path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"Configured threat feed could not be read: {raw_path}: {exc}") from exc
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Configured threat feed is not valid JSON: {raw_path}: {exc}") from exc
     entries = parsed.get("extensions") if isinstance(parsed, dict) else parsed
     out: dict[str, dict[str, Any]] = {}
     if isinstance(entries, list):
@@ -2997,6 +3432,8 @@ def _load_threat_feed(path: Path | str | None = None) -> dict[str, dict[str, Any
         for extension_id, metadata in entries.items():
             if isinstance(extension_id, str):
                 out[extension_id] = dict(metadata) if isinstance(metadata, dict) else {"classification": str(metadata)}
+    if not out:
+        raise ValueError(f"Configured threat feed contains no valid extension entries: {raw_path}")
     return out
 
 
@@ -3031,18 +3468,21 @@ def _apply_extension_advisories(extensions: list[ExtensionReport], bundle: dict[
             severity = str(entry.get("severity") or "HIGH").upper()
             if severity not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
                 severity = "HIGH"
+            threat_classification = str(entry.get("threat_classification") or "").strip().lower()
+            confirmed_malware = threat_classification == "malicious"
             evidence = dict(entry)
             evidence.update({
-                "evidence_class": "vulnerability",
+                "evidence_class": "confirmed" if confirmed_malware else "vulnerability",
                 "snapshot_version": str(bundle.get("snapshot_version") or "unknown"),
                 "snapshot_sha256": str(bundle.get("sha256") or ""),
                 "exact": True,
             })
+            rule_id = "known-malicious-extension" if confirmed_malware else "known-vulnerable-extension"
             extension.findings.append(_finding(
                 extension.extension_id,
                 extension.version,
-                "known-vulnerable-extension",
-                "vulnerability",
+                rule_id,
+                "confirmed-intelligence" if confirmed_malware else "vulnerability",
                 severity,
                 0.98,
                 str(entry.get("summary") or "Exact extension artifact matched a vulnerability advisory."),
@@ -3066,6 +3506,7 @@ def _sandbox_observation_finding(extension: ExtensionReport, item: dict[str, Any
     mapping = {
         "secret_read": ("observed-secret-read", "MEDIUM", 0.78, "Sandbox observed reads of canary or sensitive credential paths."),
         "secret_exfil": ("observed-secret-exfil", "HIGH", 0.9, "Sandbox observed canary or sensitive data leaving the process."),
+        "canary_exposed": ("runtime-canary-exposed", "INFO", 0.35, "Sandbox observed the synthetic canary in process output; this does not establish external transfer."),
         "download_execute": ("observed-download-execute", "HIGH", 0.86, "Sandbox observed downloaded content being executed or loaded."),
         "persistence": ("observed-persistence", "HIGH", 0.84, "Sandbox observed persistence or autorun behavior."),
         "destructive": ("observed-destructive-behavior", "HIGH", 0.88, "Sandbox observed destructive file behavior."),
@@ -3073,6 +3514,7 @@ def _sandbox_observation_finding(extension: ExtensionReport, item: dict[str, Any
         "unexpected_network": ("runtime-network-attempt", "INFO", 0.35, "Sandbox observed an attempted network request; isolation prevented the request from completing."),
         "process_exec": ("runtime-process-execution", "INFO", 0.35, "Sandbox observed process execution; this confirms capability, not malicious intent."),
         "filesystem_write": ("runtime-filesystem-write", "INFO", 0.3, "Sandbox observed a filesystem write; this confirms capability, not malicious intent."),
+        "runtime_lifecycle_error": ("runtime-lifecycle-error", "INFO", 0.4, "A lifecycle script exited unsuccessfully; activation coverage was still attempted."),
     }
     if kind == "runtime_timeout":
         rule_id, severity, confidence, summary = (
@@ -3092,7 +3534,10 @@ def _sandbox_observation_finding(extension: ExtensionReport, item: dict[str, Any
         evidence_class = "weak"
     elif kind in mapping:
         rule_id, severity, confidence, summary = mapping[kind]
-        evidence_class = "weak" if kind in {"network_attempt", "unexpected_network", "process_exec", "filesystem_write"} else "observed"
+        evidence_class = "weak" if kind in {
+            "network_attempt", "unexpected_network", "process_exec", "filesystem_write",
+            "canary_exposed", "runtime_lifecycle_error",
+        } else "observed"
     else:
         return None
     evidence = dict(item)
@@ -3107,7 +3552,7 @@ def _sandbox_observation_finding(extension: ExtensionReport, item: dict[str, Any
         confidence,
         summary,
         file_refs,
-        "Review the sandbox trace. Dynamic observations are strong evidence but not authoritative malware without confirmed intelligence.",
+        "Review the authenticated runtime evidence. Dynamic observations are strong evidence but not authoritative malware without confirmed intelligence.",
         evidence,
     )
 
@@ -3174,6 +3619,7 @@ def _load_sandbox_observation_bundle(path: Path | str | None = None) -> dict[str
         "schema_version": str(metadata_source.get("schema_version") or "unknown"),
         "backend": str(plan.get("backend") or "external"),
         "observation_count": sum(len(items) for items in out.values()),
+        "observed_kinds": _observation_kinds(out),
     }
     if isinstance(plan.get("resource_limits"), dict):
         metadata["resource_limits"] = dict(plan["resource_limits"])
@@ -3181,6 +3627,14 @@ def _load_sandbox_observation_bundle(path: Path | str | None = None) -> dict[str
         metadata["runtime_probes"] = dict(plan["runtime_probes"])
     if isinstance(instrumentation.get("captures"), list):
         metadata["captures"] = [str(item) for item in instrumentation["captures"]]
+    external_trace = instrumentation.get("external_syscall_trace")
+    if isinstance(external_trace, dict):
+        trace_available = bool(
+            external_trace.get("requested") is True
+            and external_trace.get("available") is True
+        )
+        metadata["external_syscall_trace_available"] = trace_available
+        metadata["external_syscall_trace"] = trace_available
     return {"extensions": out, "metadata": metadata}
 
 
@@ -3217,8 +3671,26 @@ def _merge_dynamic_runtime_bundle(
         "runtime_runs": runs,
         "runtime_required_ids": sorted({str(item) for item in required_ids if str(item)}),
         "observation_count": sum(len(value) for value in merged_extensions.values()),
+        "observed_kinds": _observation_kinds(merged_extensions),
+        "external_syscall_trace": bool(
+            runtime_bundle.get("external_syscall_trace") is True
+            or base_metadata.get("external_syscall_trace") is True
+        ),
+        "external_syscall_trace_available": bool(
+            runtime_bundle.get("external_syscall_trace_available") is True
+            or base_metadata.get("external_syscall_trace_available") is True
+        ),
     })
     return {"extensions": merged_extensions, "metadata": metadata}
+
+
+def _observation_kinds(observations: dict[str, list[dict[str, Any]]]) -> dict[str, list[str]]:
+    """Expose bounded runtime event types without persisting raw paths/commands."""
+    return {
+        extension_id: sorted({str(item.get("kind")) for item in items if item.get("kind")})
+        for extension_id, items in observations.items()
+        if items
+    }
 
 
 def _apply_sandbox_provider(extensions: list[ExtensionReport], bundle: dict[str, Any]) -> None:
@@ -3258,6 +3730,19 @@ def _apply_sandbox_provider(extensions: list[ExtensionReport], bundle: dict[str,
             "error_count": error_count,
             "required": required,
             "policy": str(metadata.get("runtime_policy") or "external-evidence"),
+            # A runtime request and a host-level strace binary are not enough
+            # to prove evidence. Required artifacts only receive this bit
+            # when the parent-owned trace was available and the run produced
+            # no runtime failure. Non-executable packages are explicitly
+            # not-applicable and therefore do not claim a trace.
+            "external_syscall_trace": bool(
+                required
+                and metadata.get("external_syscall_trace") is True
+                and error_count == 0
+            ),
+            "external_syscall_trace_available": bool(
+                metadata.get("external_syscall_trace_available") is True
+            ),
         }
         extension.analysis_coverage.setdefault("providers", {})["dynamic_sandbox"] = provider
 
@@ -3556,16 +4041,20 @@ def _preventive_blocking_rule_ids(findings: list[Finding]) -> set[str]:
 
     Generic download-and-execute behavior is intentionally insufficient by itself:
     legitimate language servers and tool installers can look similar. It becomes a
-    preventive block only when automatic activation and credential handling occur in
-    the same extension. Confirmed intelligence is handled separately by verdict.
+    a preventive block only when the scanner establishes a direct credential
+    dataflow or another independent abuse chain. A credential prompt is an
+    exposure signal, not proof that the entered value reaches the downloaded
+    process. Confirmed intelligence is handled separately by verdict.
     """
     rule_ids = {finding.rule_id for finding in findings}
     blocking = rule_ids & (BLOCKING_CORRELATED_RULES | BLOCKING_OBSERVED_RULES)
-    credential_signal = bool(rule_ids & DOWNLOAD_EXECUTE_CREDENTIAL_SIGNALS) or any(
-        rule_id.startswith("secret-reference:") for rule_id in rule_ids
-    )
-    automatic_activation = bool(rule_ids & {"broad-activation", "startup-activation", "sensitive-activation"})
-    if "download-and-execute" in rule_ids and credential_signal and automatic_activation:
+    # A filename/token reference is only exposure evidence. It is deliberately
+    # excluded here: a downloaded tool plus a nearby `.env` or credential label
+    # is common in developer tooling and does not prove that the secret is used.
+    # A credential prompt remains contextual until a source-to-sink rule proves
+    # that the value reaches a file, network, or process sink.
+    credential_signal = bool(rule_ids & DOWNLOAD_EXECUTE_CREDENTIAL_SIGNALS)
+    if "download-and-execute" in rule_ids and credential_signal:
         blocking.add("download-and-execute")
     return blocking
 
@@ -3690,14 +4179,20 @@ def _load_known_bad_hashes(path: Path | str | None = None) -> dict[str, dict[str
         return {}
     try:
         text = Path(raw_path).read_text(encoding="utf-8")
-    except OSError:
-        return {}
+    except OSError as exc:
+        raise ValueError(f"Configured known-bad hash feed could not be read: {raw_path}: {exc}") from exc
+    if not text.strip():
+        raise ValueError(f"Configured known-bad hash feed is empty: {raw_path}")
 
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        return _load_line_based_hashes(text, raw_path)
-    return _load_json_hashes(parsed, raw_path)
+        hashes = _load_line_based_hashes(text, raw_path)
+    else:
+        hashes = _load_json_hashes(parsed, raw_path)
+    if not hashes:
+        raise ValueError(f"Configured known-bad hash feed contains no valid SHA-256 hashes: {raw_path}")
+    return hashes
 
 
 def _load_json_hashes(parsed: Any, source_path: str) -> dict[str, dict[str, Any]]:
@@ -3896,6 +4391,11 @@ def _declared_entrypoints(manifest: dict[str, Any], path: Path) -> set[str]:
 
 def _normalize_package_path(value: str) -> str:
     normalized = value.strip().replace("\\", "/")
+    # A few published VSIX manifests spell package-relative entrypoints with
+    # a leading slash. Treat that spelling like the runtime harness does;
+    # otherwise coverage reports a false missing entrypoint even though the
+    # bytes are present inside the artifact.
+    normalized = normalized.lstrip("/")
     while normalized.startswith("./"):
         normalized = normalized[2:]
     return normalized
@@ -4120,6 +4620,12 @@ def _is_generated_code_blob(rel: str, text: str) -> bool:
     normalized = rel.replace("\\", "/").lower()
     if normalized.endswith((".min.js", ".min.mjs", ".bundle.js", ".bundle.mjs", ".chunk.js", ".chunk.mjs")):
         return True
+    # Webpack keeps readable line breaks in development-mode bundles, so line
+    # density alone misses large generated entrypoints such as CMake Tools.
+    # Their module-table markers are stable enough to suppress false import
+    # edges while the AST/raw-text analyzers still inspect the bundle itself.
+    if len(text) >= 1_048_576 and ("webpackBootstrap" in text[:8_192] or "__webpack_modules__" in text[:65_536]):
+        return True
     newline_count = text.count("\n")
     if len(text) >= GENERATED_BLOB_BYTES:
         return True
@@ -4288,12 +4794,42 @@ def _read_text(path: Path) -> str | None:
 # structurally ubiquitous there. Retained on hand-written code.
 _GENERATED_NOISE_AST_RULES = {"ast-dynamic-call-target", "ast-bracket-notation-sensitive-access"}
 
+# These rules describe ordinary extension capabilities rather than an abuse
+# path. A large extension commonly uses each one in several bundled modules;
+# emitting one finding per file makes the report look like a list of incidents
+# even though the classification policy already treats these signals as
+# contextual. Keep the paths and occurrence count, but surface one concise
+# finding. Do not add correlated, observed, provenance, or AST rules here:
+# repeated high-specificity evidence must remain individually reviewable. The
+# AST dynamic-call rule is explicitly weak/contextual, so it is safe to merge
+# its repeated occurrences while retaining all source paths and the count.
+# Weak secret-reference markers follow the same rule: repeated references are
+# still retained as paths/counts, but should not read like separate incidents.
+_CONTEXTUAL_OCCURRENCE_RULES = frozenset({
+    "ast-dynamic-call-target",
+    "dynamic-code-loading",
+    "dynamic-shell-execution",
+    "encoded-dynamic-execution",
+    "filesystem-access",
+    "network-access",
+    "obfuscation",
+    "process-execution",
+})
+
+
+def _is_contextual_occurrence_rule(rule_id: str) -> bool:
+    """Return whether repeated weak observations can share one report row."""
+    return rule_id in _CONTEXTUAL_OCCURRENCE_RULES or rule_id.startswith("secret-reference:")
+
 
 def _dedupe_findings(findings: list[Finding]) -> list[Finding]:
     """Collapse findings that share a finding_id (identical rule + file_refs +
     evidence summary) to the first occurrence, preserving order. Multiple
     analyzers and code paths can surface the same fact; the report should state
-    it once. Scoring is unaffected -- component scores use max(), not counts."""
+    it once. Then aggregate only repeated, explicitly contextual capability
+    notes. Scoring is unaffected by the aggregation because component scores
+    use max(), while weak-context scoring reflects surfaced notes rather than
+    every duplicate file occurrence."""
     seen: set[str] = set()
     unique: list[Finding] = []
     for finding in findings:
@@ -4301,7 +4837,93 @@ def _dedupe_findings(findings: list[Finding]) -> list[Finding]:
             continue
         seen.add(finding.finding_id)
         unique.append(finding)
-    return unique
+    return _aggregate_contextual_findings(unique)
+
+
+def _aggregate_contextual_findings(findings: list[Finding]) -> list[Finding]:
+    """Merge repeated low-signal capability notes without hiding evidence.
+
+    A finding remains separate when its rule is not in the allowlist or when
+    policy has promoted it beyond ``contextual``. Aggregated findings carry the
+    union of file references and an occurrence count so callers can still
+    investigate every location and distinguish one use from many uses.
+    """
+    grouped: dict[tuple[str, str, str, str, str], Finding] = {}
+    occurrence_counts: dict[tuple[str, str, str, str, str], int] = {}
+    observation_counts: dict[tuple[str, str, str, str, str], int] = {}
+    output: list[Finding] = []
+
+    for finding in findings:
+        # The AST dynamic-call summary includes the source path and a
+        # per-file count, so using it as a grouping key would defeat the
+        # aggregation. Other contextual rules intentionally retain distinct
+        # summaries when they describe different evidence.
+        summary_key = "" if finding.rule_id == "ast-dynamic-call-target" else finding.evidence_summary
+        key = (
+            finding.rule_id,
+            finding.category,
+            finding.severity,
+            finding.evidence_type,
+            summary_key,
+        )
+        if (
+            not _is_contextual_occurrence_rule(finding.rule_id)
+            or finding_actionability(finding) != "contextual"
+        ):
+            output.append(finding)
+            continue
+
+        first = grouped.get(key)
+        if first is None:
+            grouped[key] = finding
+            occurrence_counts[key] = 1
+            observation_counts[key] = _contextual_observation_count(finding)
+            if finding.rule_id == "ast-dynamic-call-target":
+                evidence = dict(finding.evidence or {})
+                evidence["target_count"] = observation_counts[key]
+                finding.evidence = evidence
+                finding.evidence_summary = (
+                    f"AST found {observation_counts[key]} computed call target(s) in "
+                    f"{len(finding.file_refs)} file(s); see occurrence_files for paths."
+                )
+            output.append(finding)
+            continue
+
+        occurrence_counts[key] += 1
+        observation_counts[key] += _contextual_observation_count(finding)
+        first.file_refs = sorted(set(first.file_refs).union(finding.file_refs))
+        evidence = dict(first.evidence or {})
+        evidence["occurrence_count"] = occurrence_counts[key]
+        evidence["occurrence_files"] = list(first.file_refs)
+        if first.rule_id == "ast-dynamic-call-target":
+            evidence["count"] = observation_counts[key]
+            evidence["target_count"] = observation_counts[key]
+            first.evidence_summary = (
+                f"AST found {observation_counts[key]} computed call target(s) in "
+                f"{len(first.file_refs)} file(s); see occurrence_files for paths."
+            )
+        first.evidence = evidence
+        first.finding_id = _stable_id(
+            f"{first.extension_id}:{first.version}:{first.rule_id}:"
+            f"{','.join(first.file_refs)}:{first.evidence_summary}"
+        )
+
+    return output
+
+
+def _contextual_observation_count(finding: Finding) -> int:
+    """Return the number represented by one contextual finding.
+
+    Most findings represent one occurrence. The AST dynamic-call rule emits
+    one finding per file and stores the number of computed targets in
+    ``evidence.count``; preserve that total when files are merged.
+    """
+    if finding.rule_id == "ast-dynamic-call-target":
+        try:
+            return max(1, int((finding.evidence or {}).get("count") or 1))
+        except (TypeError, ValueError):
+            return 1
+    return 1
 
 
 def _add_ast_findings(
@@ -4821,13 +5443,14 @@ def _finding_evidence_class(finding: Finding) -> str:
 
 
 def _is_confirmed_malware_finding(finding: Finding) -> bool:
-    if finding.rule_id == "known-bad-artifact":
+    # The evidence class is the source of truth for intelligence-backed
+    # findings. This keeps exact malicious advisory matches aligned with the
+    # same confirmed-malware path as hash and threat-feed matches while
+    # leaving ordinary vulnerability advisories reviewable/blockable without a
+    # malware label.
+    if _finding_evidence_class(finding) == "confirmed":
         return True
-    if finding.rule_id == "malicious-npm-dependency":
-        return True
-    if finding.rule_id == "trusted-threat-feed-hit":
-        return True
-    if finding.rule_id == "marketplace-removed-malware":
+    if finding.rule_id in CONFIRMED_RULES:
         return True
     return finding.rule_id == "marketplace-removed-package" and _is_removed_malware(finding.evidence)
 

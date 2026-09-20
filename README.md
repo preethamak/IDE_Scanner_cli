@@ -1,7 +1,9 @@
 # Guardrails CLI
 
 Scan extensions installed in VS Code, Cursor, Windsurf, VSCodium, and VS Code
-Insiders without executing extension code. The CLI and scanner runtime are
+Insiders without executing extension code on the host. Standard and offline
+scans are static; Deep Scan may execute required capability paths only inside a
+network-disabled Bubblewrap namespace. The CLI and scanner runtime are
 distributed together as one package.
 
 ## Install
@@ -61,7 +63,12 @@ guardrails brief --purpose "read and edit plist files" \
 
 - `standard`: required local static and JavaScript analysis.
 - `offline`: local analysis without network checks.
-- `deep`: the website Deep Scan boundary when all required providers are available.
+- `deep`: the website Deep Scan boundary when all required providers and the
+  isolated runtime are available. Deep scans require runtime execution;
+  `standard` is the static-only diagnostic profile.
+
+If the isolated runtime or any required provider is unavailable, the result is
+`INCOMPLETE`, never an apparent `ALLOW`.
 
 Missing required analysis produces `INCOMPLETE`, never `ALLOW`.
 

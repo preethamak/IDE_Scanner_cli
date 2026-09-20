@@ -1,10 +1,11 @@
 {
   "schema_version": "1",
-  "policy_version": "3.1.0-calibration.3",
+  "policy_version": "3.1.0-calibration.4",
   "description": "Versioned scoring thresholds. Verdict authority gates remain in classification_policy.py and scanner.py.",
   "components": {
     "confirmed_intelligence": {
       "known-bad-artifact": 100,
+      "known-malicious-extension": 100,
       "marketplace-removed-malware": 100,
       "malicious-npm-dependency": 98,
       "trusted-threat-feed-hit": 100
