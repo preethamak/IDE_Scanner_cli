@@ -555,8 +555,15 @@ def _execute_entrypoint(
         events, transport_ok = _verified_runtime_events(result.stderr)
         external_observations, external_trace_ok = _external_trace_observations(result, canary_files or [])
         succeeded = result.returncode == 0
+        # A controlled extension process can exit nonzero after it has already
+        # executed and emitted authenticated observations. Network denial,
+        # platform-specific child binaries, and optional host integrations are
+        # common examples. Preserve that exit as evidence instead of treating
+        # it as a harness failure; missing trace, invalid transport, and
+        # timeout remain hard coverage failures below.
+        executed_with_error = not succeeded and bool(events or external_observations)
         observations: list[dict[str, Any]] = [{
-            "kind": "entrypoint_executed" if succeeded else "sandbox_error",
+            "kind": "entrypoint_executed" if succeeded else ("runtime_entrypoint_error" if executed_with_error else "sandbox_error"),
             "phase": "activation" if not succeeded else None,
             "returncode": result.returncode,
             "stdout_bytes": len(result.stdout.encode("utf-8", errors="replace")),
@@ -1482,6 +1489,7 @@ def _write_entrypoint_runner(path: Path, manifest: dict[str, Any]) -> None:
             encoding="utf-8",
         )
         return
+    safe_main = main.lstrip("/\\")
     path.write_text(
         f"""
     const path = require('path');
@@ -1501,7 +1509,7 @@ process.on('unhandledRejection', (err) => {{
     // VSIX manifests in the wild sometimes write a leading slash even
     // though the entrypoint is package-relative. Never let a manifest turn
     // that spelling into a host-absolute path outside the mounted artifact.
-    const mainFile = path.resolve(target, {json.dumps(main.lstrip('/\\\\'))});
+    const mainFile = path.resolve(target, {json.dumps(safe_main)});
 async function run() {{
   let mod;
   try {{

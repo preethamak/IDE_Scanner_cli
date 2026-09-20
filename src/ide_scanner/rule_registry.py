@@ -4,7 +4,7 @@ from .classification_policy import POLICY_VERSION
 from .models import RuleMetadata
 from .rules import CODE_RULES
 
-RULESET_VERSION = "2026.09.21-policy-v3-calibration.32-dynamic-capability-gate"
+RULESET_VERSION = "2026.09.21-policy-v3-calibration.33-runtime-exit-evidence"
 
 
 _RULE_OVERRIDES: dict[str, dict[str, object]] = {
@@ -509,6 +509,7 @@ _NATIVE_RULE_DEFAULTS: dict[str, tuple[str, str, str, str]] = {
     "runtime-process-execution": ("dynamic-sandbox", "weak", "INFO", "The sandbox observed process execution; this confirms capability, not malicious intent."),
     "sandbox-runtime-error": ("coverage", "weak", "INFO", "The runtime sandbox could not complete one execution phase, so dynamic coverage is incomplete."),
     "runtime-lifecycle-error": ("dynamic-sandbox", "weak", "INFO", "A lifecycle script exited unsuccessfully; this does not by itself invalidate the activation probe."),
+    "runtime-entrypoint-error": ("dynamic-sandbox", "weak", "INFO", "A controlled entrypoint exited unsuccessfully after authenticated runtime evidence was collected; review the exit context alongside the observed behavior."),
     "sandbox-runtime-timeout": ("coverage", "weak", "INFO", "The runtime sandbox timed out during one execution phase, so dynamic coverage is incomplete."),
     "observed-secret-read": ("dynamic-sandbox", "observed", "MEDIUM", "The sandbox observed reads of a synthetic canary or sensitive credential path."),
     "observed-secret-exfil": ("dynamic-sandbox", "observed", "HIGH", "The sandbox observed a synthetic canary or sensitive value in a network request body."),

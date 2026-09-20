@@ -3515,6 +3515,7 @@ def _sandbox_observation_finding(extension: ExtensionReport, item: dict[str, Any
         "process_exec": ("runtime-process-execution", "INFO", 0.35, "Sandbox observed process execution; this confirms capability, not malicious intent."),
         "filesystem_write": ("runtime-filesystem-write", "INFO", 0.3, "Sandbox observed a filesystem write; this confirms capability, not malicious intent."),
         "runtime_lifecycle_error": ("runtime-lifecycle-error", "INFO", 0.4, "A lifecycle script exited unsuccessfully; activation coverage was still attempted."),
+        "runtime_entrypoint_error": ("runtime-entrypoint-error", "INFO", 0.4, "The controlled entrypoint exited unsuccessfully after emitting authenticated runtime evidence; review the exit context alongside the observed behavior."),
     }
     if kind == "runtime_timeout":
         rule_id, severity, confidence, summary = (
@@ -3536,7 +3537,7 @@ def _sandbox_observation_finding(extension: ExtensionReport, item: dict[str, Any
         rule_id, severity, confidence, summary = mapping[kind]
         evidence_class = "weak" if kind in {
             "network_attempt", "unexpected_network", "process_exec", "filesystem_write",
-            "canary_exposed", "runtime_lifecycle_error",
+            "canary_exposed", "runtime_lifecycle_error", "runtime_entrypoint_error",
         } else "observed"
     else:
         return None
