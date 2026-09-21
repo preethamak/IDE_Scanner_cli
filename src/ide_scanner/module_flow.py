@@ -54,7 +54,11 @@ def module_summary(rel: str, text: str, *, analyze_imports: bool = True) -> dict
     # relative imports but are no longer runtime edges. Preserve same-file
     # capability signals while avoiding a misleading graph for those blobs.
     import_text = _strip_js_comments(text) if analyze_imports else ""
-    matches = list(_IMPORT_RE.finditer(import_text)) if analyze_imports else []
+    matches = [
+        match
+        for match in _IMPORT_RE.finditer(import_text)
+        if _is_code_position(import_text, match.start())
+    ] if analyze_imports else []
     imports = {
         _resolve_import(rel, next(value for value in match.groups() if value))
         for match in matches
@@ -237,6 +241,76 @@ def _is_optional_import(text: str, start: int, end: int) -> bool:
     before = text[max(0, start - 1024):start]
     after = text[end:min(len(text), end + 1024)]
     return bool(re.search(r"\btry\s*\{[^{}]{0,1024}$", before, re.S) and re.search(r"\bcatch\b", after))
+
+
+def _is_code_position(text: str, index: int) -> bool:
+    """Reject import-shaped text embedded in strings, templates, or regexes.
+
+    Bundled extensions commonly ship parser diagnostics containing examples such
+    as ``require('./module')``. The bounded import regex is intentionally
+    lightweight, so a lexical guard is needed before treating a match as a
+    module edge. Template literals are treated as opaque text here; imports in
+    interpolation are not static module declarations and should not affect
+    coverage.
+    """
+    state = "normal"
+    regex_class = False
+    output: list[str] = []
+    cursor = 0
+    while cursor < index:
+        char = text[cursor]
+        if state == "normal":
+            if char in {"'", '"'}:
+                state = char
+            elif char == "`":
+                state = "template"
+            elif char == "/" and _looks_like_regex_start(output):
+                state = "regex"
+                regex_class = False
+            output.append(char)
+            cursor += 1
+            continue
+        if state in {"'", '"'}:
+            if char == "\\":
+                cursor += 2
+                output.extend((" ", " "))
+                continue
+            if char == state:
+                state = "normal"
+            output.append(" ")
+            cursor += 1
+            continue
+        if state == "template":
+            if char == "\\":
+                cursor += 2
+                output.extend((" ", " "))
+                continue
+            if char == "`":
+                state = "normal"
+            output.append(" ")
+            cursor += 1
+            continue
+        if char == "\\":
+            cursor += 2
+            output.extend((" ", " "))
+            continue
+        if char == "[":
+            regex_class = True
+        elif char == "]":
+            regex_class = False
+        elif char == "/" and not regex_class and _looks_like_regex_end(text, cursor):
+            state = "normal"
+        output.append(" ")
+        cursor += 1
+    return state == "normal"
+
+
+def _looks_like_regex_end(text: str, index: int) -> bool:
+    """Use a small delimiter check so malformed examples do not poison the scan."""
+    match = re.match(r"[dgimsuvy]*", text[index + 1:])
+    end = index + 1 + len(match.group(0)) if match else index + 1
+    next_char = text[end] if end < len(text) else ""
+    return not next_char or next_char.isspace() or next_char in ";,)]}(:?&|.+-*%"
 
 
 def _match_module(target: str, modules: dict[str, Any]) -> str | None:

@@ -28,7 +28,7 @@
     "js_ast/walker.js": "40aaeae532f36a2f3938ec29e80e85d27f8c81811410bcc9cb4dda3a99391673",
     "jsonc.py": "2e2a1b7105c0147ce04fda4d4fa3eba7cc524e138fea79baca292ea7a1504c28",
     "models.py": "efb7a6248c2635b713ff57018580df350412913d477591e0bfc8270d4bc4fc4e",
-    "module_flow.py": "d9b6c59ec2f9a67d5ee81f389e2d245693c3ac3337ec39f4e9223042319147f3",
+    "module_flow.py": "9c480499928e0c9143706f14cfe4b2984548ea9250de2376626cf3e89fffaff0",
     "posture.py": "bac247f42d292071e97519938399036e75fa2867e8c3938f2051d24a4348b8d4",
     "provider_rules/semgrep/vscode-security.yml": "8a70e439494ab532052ba72b272605165b8d4b5ca7d75fec939cc40289add60f",
     "provider_rules/yara/ide-scanner.yar": "c9995d359f336035dae5559b1aa5eeab4f7952dd2826fe0575bc33a7bffe5b3e",
@@ -52,5 +52,5 @@
   },
   "schema_version": 2,
   "source_component": "guardrails-scanner-runtime",
-  "source_revision": "a126898749eecb90b016807a5a03b6205dbb4266"
+  "source_revision": "02a0f71f61cd5b214f2d4785db876035d79b7d9c"
 }
