@@ -7,7 +7,9 @@ TOPICS = ("scan", "brief", "reports", "profiles", "policy", "automation", "short
 OVERVIEW = """# Guardrails Local Scan
 
 Scan extensions installed in VS Code, Cursor, Windsurf, VSCodium, and VS Code
-Insiders without executing extension code.
+Insiders with deterministic static analysis by default. Deep scans add a
+capability-gated Bubblewrap runtime; extension code is never executed on the
+host.
 
 ## Start here
 

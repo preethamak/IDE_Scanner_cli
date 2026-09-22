@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "policy_version": "3.1.0-calibration.4",
+  "policy_version": "3.1.0-calibration.5",
   "description": "Versioned scoring thresholds. Verdict authority gates remain in classification_policy.py and scanner.py.",
   "components": {
     "confirmed_intelligence": {
@@ -15,6 +15,7 @@
       "observed-destructive-behavior": 88,
       "observed-download-execute": 84,
       "observed-persistence": 82,
+      "observed-unexpected-capability": 60,
       "observed-secret-read": 52,
       "observed-unexpected-network": 38,
       "observed-process-exec": 36,

@@ -8,15 +8,20 @@
         "icon theme",
         "color scheme"
       ],
-      "signals": [],
+      "signals": [
+        "theme_surface"
+      ],
       "expected": [
         "activation",
-        "ide_contributions"
+        "ide_contributions",
+        "theme_surface"
       ],
       "forbidden": [
         "process_execution",
         "credential_input",
-        "native_code"
+        "native_code",
+        "network",
+        "agentic"
       ]
     },
     "formatter_linter": {

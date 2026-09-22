@@ -29,6 +29,7 @@ from .ast_analyzer import (
 )
 from .bundle_analysis import analyze_generated_bundle
 from .calibration import calibrated_score, max_calibrated_score
+from .capability_contracts import class_contract, classify_extension, expected_capabilities
 from .classification_policy import (
     POLICY_VERSION,
     effective_finding_severity,
@@ -140,6 +141,7 @@ OBSERVED_RULES = {
     "observed-destructive-behavior",
     "observed-process-exec",
     "observed-filesystem-write",
+    "observed-unexpected-capability",
 }
 CORRELATED_RULES = {
     "agent-data-exfil-chain",
@@ -1091,7 +1093,18 @@ def _runtime_required_for_report(report: ExtensionReport) -> bool:
         for item in report.capabilities
         if isinstance(item, dict)
     }
-    return bool(capability_ids & _DYNAMIC_RUNTIME_CAPABILITIES)
+    if capability_ids & _DYNAMIC_RUNTIME_CAPABILITIES:
+        return True
+    # A theme normally has no executable entrypoint. If it does, run it in the
+    # controlled namespace even when static inspection did not recognize a
+    # network/process capability. This is the boundary that catches hidden or
+    # obfuscated behavior without forcing declarative themes through a fake
+    # runtime path.
+    classification = classify_extension(report)
+    if classification.get("primary") == "theme":
+        coverage = report.analysis_coverage if isinstance(report.analysis_coverage, dict) else {}
+        return bool(coverage.get("resolved_entrypoints"))
+    return False
 
 
 def _finalize_runtime_trace_metadata(runtime_bundle: dict[str, Any]) -> None:
@@ -1585,6 +1598,15 @@ def _add_manifest_findings(
             _add_lifecycle_script_chain_findings(extension_id, version, script_name, str(scripts[script_name]), findings)
 
     contributes = manifest.get("contributes") if isinstance(manifest.get("contributes"), dict) else {}
+    theme_surfaces = [
+        key for key in ("themes", "iconThemes", "productIconThemes")
+        if key in contributes
+    ]
+    if theme_surfaces:
+        # Manifest contribution is stronger than a name/description keyword:
+        # icon packs and color themes often call themselves "icons" or use a
+        # publisher brand, while their actual IDE surface is declarative.
+        capabilities.setdefault("theme_surface", {"id": "theme_surface", "evidence": []})["evidence"].extend(theme_surfaces)
     for key in ("debuggers", "taskDefinitions", "terminal"):
         if key in contributes:
             findings.append(_finding(
@@ -3350,13 +3372,16 @@ def _apply_sandbox_observations(extensions: list[ExtensionReport], observations:
         extension = by_id.get(extension_id)
         if extension is None:
             continue
-        for item in items:
+        for item in _aggregate_sandbox_observations(items):
             if not isinstance(item, dict):
                 continue
             finding = _sandbox_observation_finding(extension, item)
             if finding is None:
                 continue
             extension.findings.append(finding)
+            unexpected = _runtime_unexpected_capability_finding(extension, item)
+            if unexpected is not None:
+                extension.findings.append(unexpected)
         (
             extension.verdict,
             extension.verdict_reason,
@@ -3366,6 +3391,126 @@ def _apply_sandbox_observations(extensions: list[ExtensionReport], observations:
             extension.risk_score,
             extension.score_details,
         ) = _classify_findings(extension.findings)
+
+
+def _runtime_unexpected_capability_finding(
+    extension: ExtensionReport,
+    item: dict[str, Any],
+) -> Finding | None:
+    """Escalate runtime process/network behavior hidden from static analysis.
+
+    Filesystem writes are intentionally excluded: caches and generated state
+    are normal runtime behavior. A process or network observation that has no
+    corresponding static capability is materially different, especially for a
+    theme or other low-power package, and deserves review rather than being
+    silently treated as an ordinary capability note.
+    """
+    kind = str(item.get("kind") or item.get("type") or "").strip()
+    runtime_capability = {
+        "process_exec": "process_execution",
+        "network_attempt": "network",
+        "unexpected_network": "network",
+    }.get(kind)
+    if not runtime_capability:
+        return None
+    declared = {
+        str(capability.get("id") or "")
+        for capability in extension.capabilities
+        if isinstance(capability, dict) and capability.get("id")
+    }
+    if runtime_capability in declared:
+        return None
+    evidence = {
+        "evidence_class": "observed",
+        "runtime_kind": kind,
+        "capability": runtime_capability,
+        "declared_capabilities": sorted(declared),
+        "observation_count": int(item.get("observation_count") or 1),
+    }
+    if item.get("path_samples"):
+        evidence["path_samples"] = list(item["path_samples"])
+    if item.get("destination_samples"):
+        evidence["destination_samples"] = list(item["destination_samples"])
+    if item.get("command_samples"):
+        evidence["command_samples"] = list(item["command_samples"])
+    return _finding(
+        extension.extension_id,
+        extension.version,
+        "observed-unexpected-capability",
+        "dynamic-sandbox",
+        "HIGH",
+        0.86,
+        f"Sandbox observed {runtime_capability.replace('_', ' ')} that static analysis did not declare.",
+        [],
+        "Review the exact runtime trace and package declaration; hidden process or network behavior is not expected for this artifact.",
+        evidence,
+        evidence_type="dynamic",
+    )
+
+
+_AGGREGATED_RUNTIME_OBSERVATIONS = frozenset({
+    # These events prove that a capability was exercised, but repeated events
+    # are not separate security incidents. Keep one finding and preserve a
+    # bounded sample plus the exact count in its evidence.
+    "secret_read",
+    "secret_exfil",
+    "canary_exposed",
+    "download_execute",
+    "persistence",
+    "destructive",
+    "network_attempt",
+    "unexpected_network",
+    "process_exec",
+    "filesystem_write",
+    "runtime_lifecycle_error",
+    "runtime_entrypoint_error",
+})
+_RUNTIME_SAMPLE_FIELDS = ("path", "command", "destination", "api", "script", "phase")
+_RUNTIME_SAMPLE_LIMIT = 25
+
+
+def _aggregate_sandbox_observations(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse repeated runtime events without discarding their evidence.
+
+    A language server can write hundreds of cache files or make several
+    connection attempts during one activation. Rendering each syscall as a
+    separate finding is noisy and makes capability evidence look like an
+    incident count. High-specificity observations remain visible, but each
+    behavior is represented once with ``observation_count`` and bounded
+    samples for investigation.
+    """
+    grouped: dict[str, dict[str, Any]] = {}
+    order: list[dict[str, Any]] = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        kind = str(raw.get("kind") or raw.get("type") or raw.get("rule_id") or "").strip()
+        if kind not in _AGGREGATED_RUNTIME_OBSERVATIONS:
+            order.append(dict(raw))
+            continue
+        aggregate = grouped.get(kind)
+        if aggregate is None:
+            aggregate = dict(raw)
+            aggregate["observation_count"] = 0
+            for field in _RUNTIME_SAMPLE_FIELDS:
+                if raw.get(field) not in (None, ""):
+                    aggregate[f"{field}_samples"] = []
+            grouped[kind] = aggregate
+            order.append(aggregate)
+        try:
+            raw_count = max(1, int(raw.get("observation_count") or 1))
+        except (TypeError, ValueError):
+            raw_count = 1
+        aggregate["observation_count"] = int(aggregate.get("observation_count") or 0) + raw_count
+        for field in _RUNTIME_SAMPLE_FIELDS:
+            value = raw.get(field)
+            if value in (None, ""):
+                continue
+            key = f"{field}_samples"
+            samples = aggregate.setdefault(key, [])
+            if value not in samples and len(samples) < _RUNTIME_SAMPLE_LIMIT:
+                samples.append(value)
+    return order
 
 
 def _apply_threat_feed(extensions: list[ExtensionReport], feed: dict[str, dict[str, Any]]) -> None:
@@ -3555,6 +3700,7 @@ def _sandbox_observation_finding(extension: ExtensionReport, item: dict[str, Any
         file_refs,
         "Review the authenticated runtime evidence. Dynamic observations are strong evidence but not authoritative malware without confirmed intelligence.",
         evidence,
+        evidence_type="dynamic",
     )
 
 
@@ -3746,6 +3892,36 @@ def _apply_sandbox_provider(extensions: list[ExtensionReport], bundle: dict[str,
             ),
         }
         extension.analysis_coverage.setdefault("providers", {})["dynamic_sandbox"] = provider
+        if required:
+            declared = {
+                str(capability.get("id") or "")
+                for capability in extension.capabilities
+                if isinstance(capability, dict) and capability.get("id")
+            }
+            observed_capabilities = sorted({
+                capability
+                for item in items
+                if isinstance(item, dict)
+                for capability in (
+                    {
+                        "process_exec": "process_execution",
+                        "network_attempt": "network",
+                        "unexpected_network": "network",
+                    }.get(str(item.get("kind") or "")),
+                )
+                if capability
+            })
+            undeclared = sorted(set(observed_capabilities) - declared)
+            extension.capability_assessment = {
+                "behavioral_verification": {
+                    "status": "complete" if provider_status == "completed" else "failed",
+                    "matches_declaration": provider_status == "completed" and not undeclared,
+                    "observed_capabilities": observed_capabilities,
+                    "undeclared_capabilities": undeclared,
+                    "observation_count": len(items) if isinstance(items, list) else 0,
+                    "provider": "dynamic_sandbox",
+                }
+            }
 
 
 def _build_report(
@@ -4008,6 +4184,14 @@ def _apply_security_decision(extension: ExtensionReport) -> None:
         extension.decision = "incomplete"
         extension.decision_reason = str(extension.artifact_inventory.get("skipped_reason") or "Executable analysis did not complete.")
         return
+    contract_unexpected = _contract_unexpected_capabilities(extension)
+    if contract_unexpected:
+        extension.decision = "review"
+        extension.decision_reason = (
+            "Observed capabilities fall outside the extension's functional contract: "
+            f"{', '.join(contract_unexpected[:5])}."
+        )
+        return
     added_capabilities = list(extension.baseline_diff.get("added_capabilities") or [])
     added_findings = list(extension.baseline_diff.get("added_findings") or [])
     artifact_changed = bool(extension.baseline_diff.get("artifact_changed"))
@@ -4020,6 +4204,47 @@ def _apply_security_decision(extension: ExtensionReport) -> None:
         return
     extension.decision = "allow"
     extension.decision_reason = "Analysis completed without actionable evidence or unapproved baseline changes."
+
+
+def _contract_unexpected_capabilities(extension: ExtensionReport) -> list[str]:
+    """Return capabilities that contradict a known functional class.
+
+    Capability findings are intentionally contextual in isolation. A theme that
+    also exposes process, network, native, or credential powers is different:
+    those powers contradict the package's declared job and should enter review
+    even when static capability rules alone would otherwise be non-actionable.
+    Unknown packages are not penalized by this check; they remain governed by
+    their direct evidence and provenance.
+    """
+    classification = classify_extension(extension)
+    class_id = str(classification.get("primary") or "unknown")
+    if class_id == "unknown":
+        return []
+    profile = None
+    try:
+        from .capability_contracts import extension_profile
+
+        profile = extension_profile(extension.extension_id)
+    except (ImportError, TypeError):
+        profile = None
+    expected = expected_capabilities(profile, class_id)
+    if not expected:
+        return []
+    observed = {
+        str(item.get("id") or "")
+        for item in extension.capabilities
+        if isinstance(item, dict) and item.get("id")
+    }
+    forbidden = {
+        str(item)
+        for item in class_contract(class_id).get("forbidden", [])
+        if str(item)
+    }
+    # The positive capability lists are explanatory baselines, not complete
+    # allowlists: language tools often use network/filesystem helpers that are
+    # absent from a compact profile. Only an explicit forbidden capability is
+    # strong enough to change the decision at this layer.
+    return sorted(observed & forbidden)
 
 
 def _analysis_status(extension: ExtensionReport, coverage: dict[str, Any], incomplete: bool) -> str:
@@ -4817,6 +5042,15 @@ _CONTEXTUAL_OCCURRENCE_RULES = frozenset({
     "process-execution",
 })
 
+# A repeated high-specificity semantic chain can occur in several bundled
+# modules (for example, one client module per provider). It remains review
+# evidence, but repeating the same sentence once per file makes a report look
+# like several independent incidents. Aggregate only this narrowly defined
+# review signal and retain every source path/count in evidence. Correlated
+# download/execute, persistence, and credential-exfiltration findings remain
+# separate because multiple distinct paths are decision-relevant there.
+_REVIEW_OCCURRENCE_RULES = frozenset({"remote-credential-broker"})
+
 
 def _is_contextual_occurrence_rule(rule_id: str) -> bool:
     """Return whether repeated weak observations can share one report row."""
@@ -4842,12 +5076,13 @@ def _dedupe_findings(findings: list[Finding]) -> list[Finding]:
 
 
 def _aggregate_contextual_findings(findings: list[Finding]) -> list[Finding]:
-    """Merge repeated low-signal capability notes without hiding evidence.
+    """Merge narrowly repeatable notes without hiding evidence.
 
     A finding remains separate when its rule is not in the allowlist or when
-    policy has promoted it beyond ``contextual``. Aggregated findings carry the
-    union of file references and an occurrence count so callers can still
-    investigate every location and distinguish one use from many uses.
+    policy has promoted it beyond the allowed actionability. Aggregated
+    findings carry the union of file references and an occurrence count so
+    callers can still investigate every location and distinguish one use from
+    many uses.
     """
     grouped: dict[tuple[str, str, str, str, str], Finding] = {}
     occurrence_counts: dict[tuple[str, str, str, str, str], int] = {}
@@ -4867,10 +5102,14 @@ def _aggregate_contextual_findings(findings: list[Finding]) -> list[Finding]:
             finding.evidence_type,
             summary_key,
         )
-        if (
-            not _is_contextual_occurrence_rule(finding.rule_id)
-            or finding_actionability(finding) != "contextual"
-        ):
+        aggregateable = (
+            _is_contextual_occurrence_rule(finding.rule_id)
+            and finding_actionability(finding) == "contextual"
+        ) or (
+            finding.rule_id in _REVIEW_OCCURRENCE_RULES
+            and finding_actionability(finding) == "review"
+        )
+        if not aggregateable:
             output.append(finding)
             continue
 
@@ -5022,6 +5261,8 @@ def _finding(
     file_refs: list[str],
     recommendation: str,
     evidence: dict[str, Any] | None = None,
+    *,
+    evidence_type: str = "static",
 ) -> Finding:
     payload = f"{extension_id}:{version}:{rule_id}:{','.join(file_refs)}:{evidence_summary}"
     return Finding(
@@ -5033,7 +5274,7 @@ def _finding(
         severity=severity,  # type: ignore[arg-type]
         confidence=confidence,
         score=score_finding(severity, confidence),
-        evidence_type="static",
+        evidence_type=evidence_type,
         evidence_summary=evidence_summary,
         file_refs=file_refs,
         recommendation=recommendation,
