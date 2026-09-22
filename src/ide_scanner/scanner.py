@@ -607,9 +607,9 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
     _add_dependency_source_findings(extension_id, version, manifest, findings)
 
     files = _walk_extension_files(path)
-    entrypoints = _declared_entrypoints(manifest, path)
+    entrypoints, optional_missing_entrypoints = _declared_entrypoints(manifest, path)
     artifact_inventory = _artifact_inventory(path, files)
-    analysis_coverage = _new_analysis_coverage(files, entrypoints, path)
+    analysis_coverage = _new_analysis_coverage(files, entrypoints, path, optional_missing_entrypoints)
     _add_artifact_inventory_findings(extension_id, version, artifact_inventory, known_bad_hashes or {}, findings, capabilities, path)
     _add_repository_posture_findings(extension_id, version, manifest, path, findings, artifact_inventory)
 
@@ -4603,16 +4603,30 @@ def _walk_extension_files(path: Path) -> list[Path]:
     return files
 
 
-def _declared_entrypoints(manifest: dict[str, Any], path: Path) -> set[str]:
+def _declared_entrypoints(manifest: dict[str, Any], path: Path) -> tuple[set[str], list[str]]:
     entrypoints: set[str] = set()
-    for key in ("main", "browser"):
-        value = manifest.get(key)
-        if isinstance(value, str) and value.strip():
-            declared = _normalize_package_path(value)
-            entrypoints.add(_resolve_node_entrypoint(path, declared))
+    optional_missing: list[str] = []
+    main_value = manifest.get("main")
+    browser_value = manifest.get("browser")
+    has_main = isinstance(main_value, str) and bool(main_value.strip())
+    if has_main:
+        declared_main = _normalize_package_path(str(main_value))
+        entrypoints.add(_resolve_node_entrypoint(path, declared_main))
+    if isinstance(browser_value, str) and browser_value.strip():
+        declared_browser = _normalize_package_path(browser_value)
+        resolved_browser = _resolve_node_entrypoint(path, declared_browser)
+        if path.joinpath(*resolved_browser.split("/")).is_file() or not has_main:
+            entrypoints.add(resolved_browser)
+        else:
+            # VS Code's `browser` field is an alternate web target. A package
+            # with a valid desktop `main` remains analyzable for desktop
+            # installs even when it does not ship the optional web bundle.
+            # Preserve the omission as evidence without turning it into a
+            # false incomplete verdict for the artifact being scanned.
+            optional_missing.append(resolved_browser)
     if not entrypoints and (path / "extension.js").is_file():
         entrypoints.add("extension.js")
-    return entrypoints
+    return entrypoints, optional_missing
 
 
 def _normalize_package_path(value: str) -> str:
@@ -4639,7 +4653,12 @@ def _resolve_node_entrypoint(root: Path, declared: str) -> str:
     return declared
 
 
-def _new_analysis_coverage(files: list[Path], entrypoints: set[str], path: Path) -> dict[str, Any]:
+def _new_analysis_coverage(
+    files: list[Path],
+    entrypoints: set[str],
+    path: Path,
+    optional_missing_entrypoints: list[str] | None = None,
+) -> dict[str, Any]:
     all_paths = {file.relative_to(path).as_posix() for file in files}
     candidates = sorted(
         rel for rel in all_paths
@@ -4662,6 +4681,7 @@ def _new_analysis_coverage(files: list[Path], entrypoints: set[str], path: Path)
         "declared_entrypoints": sorted(entrypoints),
         "resolved_entrypoints": sorted(entrypoints & all_paths),
         "missing_entrypoints": sorted(entrypoints - all_paths),
+        "optional_missing_entrypoints": sorted(set(optional_missing_entrypoints or [])),
         "executable_candidates": candidates,
         "excluded_generated_files": excluded_generated,
         "analyzed_executable_files": [],
