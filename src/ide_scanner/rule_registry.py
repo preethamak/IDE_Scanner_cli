@@ -4,7 +4,7 @@ from .classification_policy import POLICY_VERSION
 from .models import RuleMetadata
 from .rules import CODE_RULES
 
-RULESET_VERSION = "2026.09.21-policy-v3-calibration.33-runtime-exit-evidence"
+RULESET_VERSION = "2026.09.21-policy-v3-calibration.37-manifest-capability-runtime-evidence"
 
 
 _RULE_OVERRIDES: dict[str, dict[str, object]] = {
@@ -151,6 +151,16 @@ _RULE_OVERRIDES: dict[str, dict[str, object]] = {
         "recommendation": "Review the download source and require an independent trusted hash or signature plus explicit user approval before installation.",
         "false_positive_notes": "Legitimate IDE tooling and enterprise updaters may install extensions. This rule is review evidence unless it is correlated with direct credential transfer, destructive behavior, or observed execution abuse.",
         "benchmark_tags": ["download", "extension-install", "supply-chain"],
+    },
+    "observed-unexpected-capability": {
+        "title": "Runtime capability was not statically declared",
+        "category": "dynamic-sandbox",
+        "evidence_class": "observed",
+        "default_severity": "HIGH",
+        "description": "Controlled runtime execution observed process or network behavior that static inspection did not declare.",
+        "recommendation": "Review the exact runtime trace and package declaration; hidden process or network behavior is not expected for this artifact.",
+        "false_positive_notes": "A runtime observation can expose behavior in a dependency or a statically opaque bundle. It is review evidence, not an automatic malware verdict, until the trace establishes a higher-specificity abuse chain.",
+        "benchmark_tags": ["dynamic", "runtime", "process", "network"],
     },
     "lifecycle-script": {
         "title": "Lifecycle script",
@@ -516,6 +526,7 @@ _NATIVE_RULE_DEFAULTS: dict[str, tuple[str, str, str, str]] = {
     "observed-download-execute": ("dynamic-sandbox", "observed", "HIGH", "The sandbox observed downloaded content being executed or loaded."),
     "observed-persistence": ("dynamic-sandbox", "observed", "HIGH", "The sandbox observed writes to a persistence or autorun location."),
     "observed-destructive-behavior": ("dynamic-sandbox", "observed", "HIGH", "The sandbox observed destructive file behavior."),
+    "observed-unexpected-capability": ("dynamic-sandbox", "observed", "HIGH", "The sandbox observed process or network behavior that static analysis did not declare."),
     "security-policy-missing": ("repository-posture", "reputation", "LOW", "The packaged artifact does not include a recognized security policy."),
     "sensitive-activation": ("activation", "capability", "LOW", "The extension activates on a security-sensitive IDE event."),
     "startup-activation": ("activation", "capability", "LOW", "The extension activates automatically after IDE startup."),
@@ -590,6 +601,8 @@ def _title(rule_id: str) -> str:
 
 
 def _engine_for(rule_id: str, tags: list[str]) -> str:
+    if rule_id.startswith(("runtime-", "observed-", "sandbox-")):
+        return "dynamic-sandbox"
     if "semgrep" in tags:
         return "semgrep"
     if "yara" in tags:

@@ -57,6 +57,27 @@ _SANDBOX_SETUP_RELATIVE_PATHS = frozenset({
     "guardrails", "workspace", "target", "runner", "node-runtime-hook.js",
     "activate-entrypoint.js",
 })
+# External ``strace`` wraps Bubblewrap itself.  Its namespace construction is
+# visible in the trace before the extension process starts, so these paths are
+# infrastructure evidence rather than extension behavior.  Keep the filter
+# deliberately narrow: writes to /home/guardrails, /workspace, and /target
+# remain observable because those are the extension's writable surfaces.
+_SANDBOX_SETUP_PATH_PREFIXES = (
+    "/newroot/",
+    "/oldroot/",
+)
+_SANDBOX_SETUP_DEVICE_PATHS = frozenset({
+    "/dev/null",
+    "/dev/tty",
+    "/dev/zero",
+    "/dev/full",
+    "/dev/random",
+    "/dev/urandom",
+})
+_SANDBOX_BOOTSTRAP_EXECUTABLES = frozenset({
+    "/usr/bin/sudo",
+    "/usr/bin/bwrap",
+})
 
 
 def _external_trace_requested() -> bool:
@@ -1647,7 +1668,10 @@ def _external_trace_observations(
         syscall = syscall_match.group(1)
         lower = line.lower()
         path = _first_strace_string(line)
-        if path.replace("\\", "/").strip("/") in _SANDBOX_SETUP_RELATIVE_PATHS and "/" not in path.strip("/"):
+        normalized_path = path.replace("\\", "/")
+        if _is_sandbox_setup_path(normalized_path):
+            continue
+        if normalized_path.strip("/") in _SANDBOX_SETUP_RELATIVE_PATHS and "/" not in normalized_path.strip("/"):
             continue
         if syscall in {"open", "openat", "openat2", "creat"} and path:
             if path in canary_set or any(path.endswith(suffix) for suffix in sensitive_suffixes):
@@ -1669,6 +1693,8 @@ def _external_trace_observations(
                 "api": f"strace.{syscall}",
             })
         elif syscall in {"execve", "execveat"}:
+            if path in _SANDBOX_BOOTSTRAP_EXECUTABLES:
+                continue
             observations.append({
                 "kind": "process_exec",
                 "command": path or "external-syscall",
@@ -1685,6 +1711,21 @@ def _external_trace_observations(
                 "api": f"strace.{syscall}",
             })
     return _dedupe_observations(observations), True
+
+
+def _is_sandbox_setup_path(path: str) -> bool:
+    """Return whether a traced path belongs to Bubblewrap's own setup.
+
+    Bubblewrap creates a temporary root and opens standard device nodes while
+    constructing the namespace.  Treating those syscalls as extension writes
+    made clean extensions appear to modify the filesystem thousands of times.
+    The extension-visible writable roots are intentionally not included here.
+    """
+    normalized = path.replace("\\", "/")
+    return (
+        any(normalized.startswith(prefix) for prefix in _SANDBOX_SETUP_PATH_PREFIXES)
+        or normalized in _SANDBOX_SETUP_DEVICE_PATHS
+    )
 
 
 def _first_strace_string(line: str) -> str:

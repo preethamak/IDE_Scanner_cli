@@ -26,7 +26,10 @@ def scan_installed(
     update = progress or (lambda _message: None)
     update(f"Creating private snapshots for {len(rows)} installation(s)…")
     with snapshot_installations(rows) as snapshot_rows:
-        update("Analyzing extension packages without executing their code…")
+        if dynamic_runtime or profile == "deep":
+            update("Analyzing extension packages with static checks and capability-gated Bubblewrap runtime…")
+        else:
+            update("Analyzing extension packages with deterministic static checks…")
         report = run_with_profile(
             profile,
             lambda required_providers: scan_paths(

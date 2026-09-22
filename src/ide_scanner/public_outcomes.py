@@ -106,10 +106,18 @@ def apply_public_assessment(extension: ExtensionReport) -> None:
     )
     provenance_tier = "conflicted" if conflicted else "established" if established else "verified" if verified else "unknown"
     contract_class = str(profile.get("class") or classification["primary"]) if profile else str(classification["primary"])
-    expected = expected_capabilities(profile, contract_class) if profile else set()
+    expected = expected_capabilities(profile, contract_class) if profile else expected_capabilities(None, contract_class)
     forbidden = set(class_contract(contract_class).get("forbidden", []))
     matched = sorted(set(capability_ids) & expected)
-    unexpected_capabilities = sorted(set(capability_ids) - expected) if profile else capability_ids
+    # Generic classes only assert their forbidden surface. A formatter or
+    # language tool may legitimately expose capabilities not listed in the
+    # compact contract, while a theme exposing process/network/native powers is
+    # a meaningful declaration mismatch even without a hand-maintained profile.
+    unexpected_capabilities = (
+        sorted(set(capability_ids) & forbidden)
+        if contract_class != "unknown"
+        else []
+    )
     unexplained_findings = sorted(
         finding.rule_id for finding in extension.findings
         if _evidence_class(finding) not in _EXPLAINABLE_CLASSES
@@ -133,6 +141,7 @@ def apply_public_assessment(extension: ExtensionReport) -> None:
         "unexplained_findings": unexplained_findings,
         "classification": classification,
         "contract_class": contract_class,
+        "expected": sorted(expected),
         "forbidden_observed": sorted(set(capability_ids) & forbidden),
     }
     if isinstance(behavioral_verification, dict):
@@ -150,6 +159,10 @@ def apply_public_assessment(extension: ExtensionReport) -> None:
         extension.public_outcome = "preventive_block"
         extension.decision_basis = "high_specificity_abuse_path"
         extension.evidence_confidence = "high"
+    elif unexpected_capabilities:
+        extension.public_outcome = "investigate"
+        extension.decision_basis = "capability_contract_mismatch"
+        extension.evidence_confidence = "medium"
     elif (
         extension.decision == "review"
         and established
