@@ -4,7 +4,7 @@ from .classification_policy import POLICY_VERSION
 from .models import RuleMetadata
 from .rules import CODE_RULES
 
-RULESET_VERSION = "2026.09.24-policy-v3-calibration.41-transpiled-process-alias"
+RULESET_VERSION = "2026.09.24-policy-v3-calibration.42-hidden-remote-workspace-task"
 
 
 _RULE_OVERRIDES: dict[str, dict[str, object]] = {
@@ -161,6 +161,16 @@ _RULE_OVERRIDES: dict[str, dict[str, object]] = {
         "recommendation": "Review the download source and require an independent trusted hash or signature plus explicit user approval before installation.",
         "false_positive_notes": "Legitimate IDE tooling and enterprise updaters may install extensions. This rule is review evidence unless it is correlated with direct credential transfer, destructive behavior, or observed execution abuse.",
         "benchmark_tags": ["download", "extension-install", "supply-chain"],
+    },
+    "hidden-remote-workspace-task": {
+        "title": "Hidden remote workspace task",
+        "category": "supply-chain",
+        "evidence_class": "correlated",
+        "default_severity": "HIGH",
+        "description": "A background VS Code task invokes a remote GitHub commit through npx while using hidden task presentation markers.",
+        "recommendation": "Review the exact remote repository and commit, require an independently trusted provenance path, and keep the task visible and user-approved.",
+        "false_positive_notes": "This is review evidence, not a malware verdict. It only fires when remote GitHub execution and hidden workspace-task markers occur together; ordinary shell tasks and theme capabilities do not match.",
+        "benchmark_tags": ["supply-chain", "workspace-task", "github", "npx"],
     },
     "observed-unexpected-capability": {
         "title": "Runtime capability was not statically declared",

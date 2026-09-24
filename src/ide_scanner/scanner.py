@@ -166,6 +166,7 @@ CORRELATED_RULES = {
     "obfuscation-execution-network",
     "persistence-chain",
     "remote-vsix-install-chain",
+    "hidden-remote-workspace-task",
     "obfuscated-credential-harvesting-exfiltration",
     "supply-chain-dropper-chain",
 }
@@ -182,6 +183,7 @@ BLOCKING_CORRELATED_RULES = CORRELATED_RULES - {
     "destructive-transfer-chain",
     "environment-data-exfiltration",
     "persistence-chain",
+    "hidden-remote-workspace-task",
 }
 BLOCKING_OBSERVED_RULES = {
     "observed-destructive-behavior",
@@ -2409,6 +2411,47 @@ def _add_code_findings(
                 "transform": "local-vsix-write",
                 "sink": "workbench.extensions.installExtension",
                 "integrity_verification": False,
+            },
+        ))
+
+    # A background workspace task that launches a remote GitHub commit through
+    # npx is materially different from ordinary shell/terminal capability.
+    # Keep this high-specificity and review-only: a legitimate agent or setup
+    # tool may intentionally do it, but the combination of remote code,
+    # workspace execution, and hidden presentation deserves approval review.
+    remote_github_npx_re = re.compile(
+        r"\bnpx\s+-y\s+github:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#(?:[0-9a-f]{40}|\$\{[A-Za-z_$][\w$]*\})",
+        re.I,
+    )
+    remote_commit_hash_re = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])", re.I)
+    hidden_workspace_task_re = re.compile(
+        r"(?:install-mcp-extension|mcpExtensionInstalledSha|presentationOptions\.focus\s*=\s*!1)",
+        re.I,
+    )
+    remote_github_npx_match = remote_github_npx_re.search(text)
+    hidden_workspace_task_matches = hidden_workspace_task_re.findall(text)
+    if (
+        remote_github_npx_match
+        and remote_commit_hash_re.search(text)
+        and hidden_workspace_task_matches
+        and re.search(r"\bShellExecution\b", text)
+    ):
+        findings.append(_finding(
+            extension_id,
+            version,
+            "hidden-remote-workspace-task",
+            "supply-chain",
+            "HIGH",
+            0.9,
+            "A background workspace task launches a remote GitHub commit through npx while using hidden task presentation markers.",
+            [rel],
+            "Review the exact remote repository and commit, require independently trusted provenance, and keep the task visible and user-approved.",
+            {
+                "evidence_class": "correlated",
+                "correlation": "remote-github-execution-plus-hidden-workspace-task",
+                "remote_source": remote_github_npx_match.group(0),
+                "hidden_markers": sorted(set(hidden_workspace_task_matches)),
+                "execution_surface": "ShellExecution",
             },
         ))
 
