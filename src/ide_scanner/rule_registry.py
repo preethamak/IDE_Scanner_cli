@@ -4,7 +4,7 @@ from .classification_policy import POLICY_VERSION
 from .models import RuleMetadata
 from .rules import CODE_RULES
 
-RULESET_VERSION = "2026.09.21-policy-v3-calibration.37-manifest-capability-runtime-evidence"
+RULESET_VERSION = "2026.09.24-policy-v3-calibration.41-transpiled-process-alias"
 
 
 _RULE_OVERRIDES: dict[str, dict[str, object]] = {
@@ -82,6 +82,16 @@ _RULE_OVERRIDES: dict[str, dict[str, object]] = {
         "recommendation": "Block the extension and investigate its credential collection paths and network destinations.",
         "false_positive_notes": "Legitimate migration or backup tools can exhibit similar behavior and require explicit user intent and documented destinations.",
         "benchmark_tags": ["credential", "filesystem", "network", "interprocedural"],
+    },
+    "environment-data-exfiltration": {
+        "title": "Whole environment reaches outbound request",
+        "category": "credential-access",
+        "evidence_class": "correlated",
+        "default_severity": "HIGH",
+        "description": "Detects the complete process environment, or a serialization of it, reaching an outbound request through a bounded local data flow.",
+        "recommendation": "Review the exact environment fields, destination, user disclosure, and whether the transfer is necessary. Sending the complete process environment is not ordinary telemetry.",
+        "false_positive_notes": "Legitimate telemetry should select documented fields rather than serialize the full process environment; selected process.env.KEY access is intentionally not sufficient for this rule.",
+        "benchmark_tags": ["credential", "environment", "network", "value-flow"],
     },
     "obfuscated-credential-harvesting-exfiltration": {
         "title": "Obfuscated credential harvesting and exfiltration",
@@ -493,7 +503,10 @@ _RULE_OVERRIDES: dict[str, dict[str, object]] = {
 # exported rules catalog. Keep this compact catalog close to the metadata builder;
 # tests compare it with literal _finding() emissions from scanner.py.
 _NATIVE_RULE_DEFAULTS: dict[str, tuple[str, str, str, str]] = {
+    "agent-filesystem-tool": ("agentic", "capability", "MEDIUM", "An agent-facing contribution can read or write workspace files."),
+    "agent-network-tool": ("agentic", "capability", "MEDIUM", "An agent-facing contribution can reach network resources."),
     "agent-prompt-injection-sink": ("agentic", "capability", "MEDIUM", "Agent contribution metadata combines untrusted-content surfaces with tool execution terms."),
+    "agent-shell-tool": ("agentic", "capability", "MEDIUM", "An agent-facing contribution can invoke shell or process commands."),
     "binary-without-origin": ("provenance", "provenance", "MEDIUM", "A packaged native binary has no companion checksum, signature, or documented origin."),
     "broad-activation": ("activation", "capability", "LOW", "The extension declares wildcard activation."),
     "credential-file-read": ("credential-access", "weak", "MEDIUM", "Credential references appear near local file-read capability."),
@@ -505,6 +518,15 @@ _NATIVE_RULE_DEFAULTS: dict[str, tuple[str, str, str, str]] = {
     "install-secret-access": ("install-time", "correlated", "HIGH", "A lifecycle script references credential material."),
     "install-shell-obfuscation": ("install-time", "correlated", "HIGH", "A lifecycle script contains decoded, evaluated, or piped shell execution."),
     "license-missing": ("repository-posture", "reputation", "LOW", "The packaged artifact does not include a recognized license file."),
+    "marketplace-extension-not-found": ("reputation", "reputation", "LOW", "The requested extension could not be resolved in the configured marketplace."),
+    "marketplace-low-install-count": ("reputation", "reputation", "LOW", "Marketplace install volume is low relative to the configured trust threshold."),
+    "marketplace-low-rating": ("reputation", "reputation", "LOW", "Marketplace rating evidence is below the configured trust threshold."),
+    "marketplace-name-impersonation": ("reputation", "reputation", "MEDIUM", "Marketplace identity resembles a protected or well-known extension name."),
+    "marketplace-removed-malware": ("confirmed-intelligence", "confirmed", "CRITICAL", "Marketplace evidence identifies the exact extension as removed for malware."),
+    "marketplace-stale-extension": ("reputation", "reputation", "LOW", "Marketplace metadata indicates that the extension has not been updated recently."),
+    "marketplace-unverified-publisher": ("reputation", "reputation", "LOW", "The marketplace publisher is not independently verified."),
+    "marketplace-verified-publisher": ("reputation", "reputation", "INFO", "The marketplace publisher has a verified publisher signal."),
+    "install-rating-mismatch": ("reputation", "reputation", "LOW", "Marketplace install and rating metadata are inconsistent with the expected range."),
     "mcp-server-command": ("agentic", "capability", "MEDIUM", "The extension contributes an MCP server command or definition."),
     "mutable-dependency-source": ("dependency", "dependency", "MEDIUM", "A runtime dependency uses a mutable or non-registry source."),
     "obfuscation-execution-network": ("execution", "correlated", "HIGH", "Direct decoded execution appears near network behavior."),
@@ -526,7 +548,12 @@ _NATIVE_RULE_DEFAULTS: dict[str, tuple[str, str, str, str]] = {
     "observed-download-execute": ("dynamic-sandbox", "observed", "HIGH", "The sandbox observed downloaded content being executed or loaded."),
     "observed-persistence": ("dynamic-sandbox", "observed", "HIGH", "The sandbox observed writes to a persistence or autorun location."),
     "observed-destructive-behavior": ("dynamic-sandbox", "observed", "HIGH", "The sandbox observed destructive file behavior."),
+    "observed-filesystem-write": ("dynamic-sandbox", "observed", "INFO", "The sandbox observed a filesystem write."),
+    "observed-process-exec": ("dynamic-sandbox", "observed", "INFO", "The sandbox observed process execution."),
     "observed-unexpected-capability": ("dynamic-sandbox", "observed", "HIGH", "The sandbox observed process or network behavior that static analysis did not declare."),
+    "repo-archived": ("reputation", "reputation", "LOW", "The source repository is archived."),
+    "repo-maintained": ("reputation", "reputation", "INFO", "The source repository shows a maintained signal."),
+    "repo-stale": ("reputation", "reputation", "LOW", "The source repository has not received recent maintenance activity."),
     "security-policy-missing": ("repository-posture", "reputation", "LOW", "The packaged artifact does not include a recognized security policy."),
     "sensitive-activation": ("activation", "capability", "LOW", "The extension activates on a security-sensitive IDE event."),
     "startup-activation": ("activation", "capability", "LOW", "The extension activates automatically after IDE startup."),
@@ -535,6 +562,7 @@ _NATIVE_RULE_DEFAULTS: dict[str, tuple[str, str, str, str]] = {
     "webview-csp-missing": ("webview", "capability", "MEDIUM", "A detected webview lacks a Content-Security-Policy meta tag."),
     "webview-csp-unsafe-directive": ("webview", "capability", "MEDIUM", "A webview CSP contains an unsafe directive."),
     "workflow-token-permissions-broad": ("repository-posture", "posture", "LOW", "A workflow grants broad token permissions or relies on implicit defaults."),
+    "trusted-threat-feed-hit": ("confirmed-intelligence", "confirmed", "CRITICAL", "A configured trusted threat feed matched the exact extension identity or artifact."),
 }
 
 
@@ -609,7 +637,13 @@ def _engine_for(rule_id: str, tags: list[str]) -> str:
         return "yara"
     if rule_id.startswith("ast-"):
         return "javascript-ast"
-    if rule_id in {"known-bad-artifact", "known-malicious-extension", "marketplace-removed-package"}:
+    if rule_id in {
+        "known-bad-artifact",
+        "known-malicious-extension",
+        "marketplace-removed-malware",
+        "marketplace-removed-package",
+        "trusted-threat-feed-hit",
+    }:
         return "threat-intelligence"
     if rule_id in {"malicious-npm-dependency", "vulnerable-npm-dependency"}:
         return "dependency-intelligence"

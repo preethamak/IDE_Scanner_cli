@@ -3,13 +3,13 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-import os
 import re
 import zipfile
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from .build_identity import scanner_build
 from .classification_policy import effective_finding_severity, finding_actionability, finding_evidence_class
 from .evidence import location_from_finding
 from .jsonc import loads_jsonc
@@ -157,6 +157,7 @@ def _summary(
     severity_counts: dict[str, int] = {}
     category_counts: dict[str, int] = {}
     finding_counts: dict[str, int] = {}
+    finding_actionability_counts: dict[str, int] = {}
     evidence_class_counts: dict[str, int] = {}
     decision_counts = {decision: 0 for decision in ("block", "review", "incomplete", "allow")}
     analysis_status_counts: dict[str, int] = {}
@@ -170,6 +171,8 @@ def _summary(
         for finding in extension.findings:
             finding_counts[finding.rule_id] = finding_counts.get(finding.rule_id, 0) + 1
             category_counts[finding.category] = category_counts.get(finding.category, 0) + 1
+            actionability = finding_actionability(finding)
+            finding_actionability_counts[actionability] = finding_actionability_counts.get(actionability, 0) + 1
             evidence_class = str((finding.evidence or {}).get("evidence_class") or "weak")
             evidence_class_counts[evidence_class] = evidence_class_counts.get(evidence_class, 0) + 1
     posture_summary = report.get("posture_summary") if isinstance(report.get("posture_summary"), dict) else {}
@@ -190,6 +193,7 @@ def _summary(
         },
         "top_risk_extensions": [summary.to_dict() for summary in _rank_summaries(summaries)[:10]],
         "finding_counts": _sorted_counts(finding_counts),
+        "finding_actionability_counts": _sorted_counts(finding_actionability_counts),
         "severity_counts": _sorted_counts(severity_counts),
         "category_counts": _sorted_counts(category_counts),
         "evidence_class_counts": _sorted_counts(evidence_class_counts),
@@ -198,6 +202,17 @@ def _summary(
 
 
 def _to_summary(extension: ExtensionReport) -> ExtensionSummary:
+    ranked_findings = _rank_findings(extension.findings)
+    actionability_counts = {
+        "block": sum(1 for finding in extension.findings if finding_actionability(finding) == "block"),
+        "review": sum(1 for finding in extension.findings if finding_actionability(finding) in {"review", "investigate"}),
+        "low": sum(1 for finding in extension.findings if finding_actionability(finding) == "low"),
+        "contextual": sum(1 for finding in extension.findings if finding_actionability(finding) == "contextual"),
+    }
+    headline_findings = [
+        finding for finding in ranked_findings
+        if finding_actionability(finding) in {"block", "review", "low"}
+    ]
     return ExtensionSummary(
         extension_id=extension.extension_id,
         name=extension.name,
@@ -212,8 +227,14 @@ def _to_summary(extension: ExtensionReport) -> ExtensionSummary:
         grade=grade_extension(extension.verdict, extension.risk_score, extension.malware_score, extension.findings),
         verdict_state=_verdict_state(extension),
         verdict_label=_verdict_label(extension),
-        top_findings=[finding.rule_id for finding in _rank_findings(extension.findings)[:5]],
+        # Context-only capability and posture signals remain in the exact
+        # detail report, but headline evidence must not present them as
+        # security alerts when no action is required.
+        top_findings=[finding.rule_id for finding in headline_findings[:5]],
         finding_count=len(extension.findings),
+        actionable_finding_count=actionability_counts["block"] + actionability_counts["review"],
+        low_finding_count=actionability_counts["low"],
+        contextual_finding_count=actionability_counts["contextual"],
         dependency_count=len(extension.dependencies),
         activation_summary=_activation_summary(extension),
         detail_ref=f"extensions/{_safe_detail_name(extension.extension_id, extension.version)}.json",
@@ -352,13 +373,18 @@ def _security_dimensions(extension: ExtensionReport) -> dict[str, Any]:
         for finding in extension.findings:
             if finding.category not in categories:
                 continue
-            weight = severity_weight.get(finding.severity, 0)
+            # Dimension scores are user-facing risk summaries. Apply the same
+            # evidence policy as verdicts and headlines so a raw HIGH/MEDIUM
+            # detector label that is explicitly contextual cannot deduct
+            # points from a legitimate extension's security posture.
+            effective_severity = effective_finding_severity(finding)
+            weight = severity_weight.get(effective_severity, 0)
             evidence_class = str((finding.evidence or {}).get("evidence_class") or "weak")
             if evidence_class in {"weak", "reputation"}:
                 weight = max(1 if weight else 0, weight // 2)
             if weight:
                 score -= weight
-                deductions.append({"rule_id": finding.rule_id, "points": weight, "severity": finding.severity})
+                deductions.append({"rule_id": finding.rule_id, "points": weight, "severity": effective_severity})
         final_score = max(0, score)
         dimensions[dimension] = {
             "score": final_score,
@@ -537,10 +563,14 @@ def _evidence_record(finding: dict[str, Any], *, include_raw_evidence: bool) -> 
 
 
 def _rank_findings(findings: list[Any]) -> list[Any]:
+    actionability_rank = {"block": 4, "review": 3, "low": 2, "contextual": 1}
     severity_rank = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1}
     return sorted(findings, key=lambda item: (
-        severity_rank.get(str(getattr(item, "severity", "")), 0),
+        actionability_rank.get(finding_actionability(item), 0),
+        severity_rank.get(effective_finding_severity(item), 0),
+        finding_evidence_class(item) in {"confirmed", "vulnerability", "correlated"},
         int(getattr(item, "score", 0) or 0),
+        float(getattr(item, "confidence", 0) or 0),
         str(getattr(item, "rule_id", "")),
     ), reverse=True)
 
@@ -671,12 +701,8 @@ def _scanner_version() -> str:
 
 
 def _scanner_build() -> str:
-    """Return the immutable CI revision when one is available.
-
-    Local reports deliberately say ``unknown`` rather than pretending to be a
-    production build. The website treats an unknown build as non-reusable.
-    """
-    return os.environ.get("IDE_SCANNER_BUILD_SHA", "").strip() or "unknown"
+    """Return the immutable CI or source-checkout revision when available."""
+    return scanner_build()
 
 
 def _write_json(archive: zipfile.ZipFile, name: str, data: Any) -> None:

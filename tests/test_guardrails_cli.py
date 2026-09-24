@@ -146,11 +146,27 @@ class GuardrailsCliTests(unittest.TestCase):
             "sample.extension",
             version="1.0.0",
             target_platform="darwin-x64",
+            extension_advisories=None,
             registry_snapshot="prior-report.json",
             required_providers=frozenset({"semgrep", "yara", "dependency_intelligence"}),
             dynamic_runtime=True,
             runtime_timeout_seconds=20,
         )
+
+    def test_marketplace_scan_forwards_exact_advisory_snapshot(self) -> None:
+        report = {"scan_id": "scan-1", "summary": {}, "extensions": []}
+        with (
+            patch("guardrails_cli.main.scan_marketplace", return_value=report) as scan,
+            patch("guardrails_cli.main.display_report", return_value=report),
+            patch("guardrails_cli.main.render_scan_report", return_value="ok"),
+        ):
+            code, _output, error = self.run_cli([
+                "scan", "--marketplace", "sample.extension@1.0.0",
+                "--extension-advisories", "advisories.json", "--fail-on", "never",
+            ])
+
+        self.assertEqual((code, error), (0, ""))
+        self.assertEqual(scan.call_args.kwargs["extension_advisories"], "advisories.json")
 
     def test_local_deep_scan_forwards_runtime_contract(self) -> None:
         report = {"scan_id": "scan-1", "summary": {}, "extensions": []}
@@ -179,6 +195,7 @@ class GuardrailsCliTests(unittest.TestCase):
         scan.assert_called_once_with(
             ["/tmp/sample.vsix"],
             online=True,
+            extension_advisories=None,
             registry_snapshot=None,
             required_providers=frozenset({"semgrep", "yara", "dependency_intelligence"}),
             dynamic_runtime=True,
@@ -236,6 +253,31 @@ class GuardrailsCliTests(unittest.TestCase):
         self.assertFalse(payload["agent_handoff"]["recommendation_permitted"])
         self.assertFalse(payload["agent_handoff"]["installation_permitted"])
         self.assertIn("Do not recommend", payload["agent_policy"][0])
+
+    def test_deep_brief_forwards_runtime_contract(self) -> None:
+        report = {
+            "extensions": [{
+                "extension_id": "sample.deep", "version": "1.0.0", "publisher": "sample",
+                "decision": "incomplete", "analysis_coverage": {"status": "incomplete", "coverage_percent": 0},
+                "artifact_identity": {"sha256": "a" * 64}, "findings": [],
+            }],
+        }
+        with patch("guardrails_cli.main.scan_marketplace", return_value=report) as scan:
+            code, _output, error = self.run_cli([
+                "brief", "--purpose", "read plist files", "--profile", "deep",
+                "--marketplace", "sample.deep@1.0.0",
+            ])
+
+        self.assertEqual((code, error), (3, ""))
+        scan.assert_called_once_with(
+            "sample.deep",
+            version="1.0.0",
+            target_platform=None,
+            extension_advisories=None,
+            registry_snapshot=None,
+            required_providers=frozenset({"semgrep", "yara", "dependency_intelligence"}),
+            dynamic_runtime=True,
+        )
 
     def test_brief_never_treats_incomplete_analysis_as_recommendable(self) -> None:
         incomplete = {

@@ -50,9 +50,16 @@ def validate_production_corpus(data: Any) -> None:
         raise ValueError("Production corpus threshold max_incomplete_required must be a non-negative integer")
 
 
-def evaluate_production_corpus(corpus_path: Path | str, report_path: Path | str) -> dict[str, Any]:
+def evaluate_production_corpus(
+    corpus_path: Path | str,
+    report_path: Path | str,
+    *,
+    require_identity: bool = False,
+    expected_scanner_build: str | None = None,
+) -> dict[str, Any]:
     corpus = load_production_corpus(corpus_path)
     report = load_report(Path(report_path))
+    report_identity = _report_identity(report)
     actual_by_identity = {
         _actual_key(item): item
         for item in report.get("extensions") or []
@@ -71,15 +78,20 @@ def evaluate_production_corpus(corpus_path: Path | str, report_path: Path | str)
         "malicious_allow_rate": summary["malicious_allow_rate"] <= thresholds["max_malicious_allow_rate"],
         "incomplete_required": summary["incomplete_required"] <= thresholds["max_incomplete_required"],
     }
+    if require_identity:
+        identity_is_complete = all(
+            report_identity[key] not in {"", "unknown", "legacy"}
+            for key in ("scanner_build", "policy_version", "ruleset_version")
+        )
+        if expected_scanner_build is not None:
+            identity_is_complete = identity_is_complete and report_identity["scanner_build"] == expected_scanner_build
+        gate_checks["report_identity"] = identity_is_complete
     gate_passed = all(gate_checks.values())
     return {
         "schema_version": PRODUCTION_CORPUS_SCHEMA_VERSION,
         "corpus_id": corpus["corpus_id"],
         "corpus_version": corpus.get("corpus_version", "unknown"),
-        "report_identity": {
-            key: report.get(key) or (report.get("metadata") or {}).get(key)
-            for key in ("scanner_build", "policy_version", "ruleset_version")
-        },
+        "report_identity": report_identity,
         "gate": {
             "passed": gate_passed,
             "checks": gate_checks,
@@ -97,6 +109,9 @@ def evaluate_holdout_corpus(
     report_path: Path | str,
     *,
     require_runtime: bool = True,
+    require_malicious_block: bool = True,
+    require_identity: bool = False,
+    expected_scanner_build: str | None = None,
 ) -> dict[str, Any]:
     """Evaluate a frozen, independently labelled exact-artifact holdout.
 
@@ -119,6 +134,7 @@ def evaluate_holdout_corpus(
             expected,
             actual_by_identity.get(_expected_key(expected)),
             require_runtime=require_runtime,
+            require_malicious_block=require_malicious_block,
         )
         for expected in corpus["artifacts"]
     ]
@@ -137,11 +153,20 @@ def evaluate_holdout_corpus(
         "deep_profile": deep_profile if require_runtime else True,
         "external_syscall_trace": external_syscall_trace if require_runtime else True,
     }
+    report_identity = _report_identity(report)
+    if require_identity:
+        identity_is_complete = all(
+            report_identity[key] not in {"", "unknown", "legacy"}
+            for key in ("scanner_build", "policy_version", "ruleset_version")
+        )
+        if expected_scanner_build is not None:
+            identity_is_complete = identity_is_complete and report_identity["scanner_build"] == expected_scanner_build
+        checks["report_identity"] = identity_is_complete
     return {
         "schema_version": HOLDOUT_CORPUS_SCHEMA_VERSION,
         "corpus_id": corpus["corpus_id"],
         "corpus_version": corpus["corpus_version"],
-        "report_identity": _report_identity(report),
+        "report_identity": report_identity,
         "runtime_evidence": {
             "required": require_runtime,
             "runtime_enabled": runtime_enabled,
@@ -149,6 +174,8 @@ def evaluate_holdout_corpus(
             "external_syscall_trace": external_syscall_trace,
             "runtime_timeout_seconds": execution.get("runtime_timeout_seconds", 0),
         },
+        "classification_mode": "intel-backed" if require_malicious_block else "behavior-only",
+        "advisory_snapshot": execution.get("extension_advisories") if isinstance(execution.get("extension_advisories"), dict) else {},
         "gate": {
             "passed": all(checks.values()),
             "checks": checks,
@@ -237,6 +264,7 @@ def _evaluate_holdout_artifact(
     actual: dict[str, Any] | None,
     *,
     require_runtime: bool,
+    require_malicious_block: bool,
 ) -> dict[str, Any]:
     violations: list[str] = []
     if actual is None:
@@ -257,10 +285,20 @@ def _evaluate_holdout_artifact(
         if decision == "block" or verdict == "malicious":
             violations.append("known-safe artifact was blocked or classified malicious")
     else:
-        if decision != "block":
+        if require_malicious_block and decision != "block":
             violations.append(f"known-malicious artifact was not blocked (decision={decision!r})")
-        if verdict not in {"suspicious", "malicious"}:
-            violations.append(f"known-malicious artifact verdict {verdict!r} is not suspicious or malicious")
+        if not require_malicious_block and decision not in {"review", "block"}:
+            violations.append(f"known-malicious artifact was not detected (decision={decision!r})")
+        allowed_verdicts = {"suspicious", "malicious"}
+        if not require_malicious_block:
+            # Behavior-only replay deliberately has no trusted advisory. A
+            # high-risk quarantine decision is still a detection even when the
+            # public verdict remains REVIEW rather than claiming MALICIOUS.
+            allowed_verdicts.add("review")
+        if verdict not in allowed_verdicts:
+            violations.append(
+                f"known-malicious artifact verdict {verdict!r} is not one of {sorted(allowed_verdicts)}"
+            )
     expected_hash = str((expected.get("artifact") or {}).get("sha256") or "").lower()
     actual_hash = str(actual.get("artifact_hash") or (actual.get("artifact_identity") or {}).get("sha256") or "").lower()
     if actual_hash != expected_hash:
@@ -309,8 +347,12 @@ def _runtime_contract(actual: dict[str, Any]) -> dict[str, Any]:
     return {
         "coverage_status": str(coverage.get("status") or ""),
         "required_providers_complete": coverage.get("required_providers_complete") is True,
-        "required": provider.get("required") is True,
+        # Preserve an absent/malformed declaration as unknown. Treating it as
+        # ``False`` would let a missing provider masquerade as explicitly
+        # not-applicable coverage.
+        "required": provider.get("required") if isinstance(provider.get("required"), bool) else None,
         "provider_status": str(provider.get("status") or ""),
+        "runtime_run_status": str(provider.get("runtime_run_status") or ""),
         "execution": str(provider.get("execution") or ""),
         "runtime_policy": str(provider.get("policy") or ""),
         "executed": provider.get("executed") is True,
@@ -324,18 +366,22 @@ def _runtime_contract_violations(contract: dict[str, Any]) -> list[str]:
     if contract.get("required") is True:
         expected = {
             "provider_status": "completed",
+            "runtime_run_status": "completed",
             "execution": "controlled-bubblewrap",
             "runtime_policy": "capability-gated-v1",
             "executed": True,
             "external_syscall_trace": True,
         }
-    else:
+    elif contract.get("required") is False:
         expected = {
             "provider_status": "not-applicable",
             "execution": "policy-gated",
             "runtime_policy": "capability-gated-v1",
             "executed": False,
+            "external_syscall_trace": False,
         }
+    else:
+        return ["runtime contract required flag is missing or invalid"]
     mismatches = [
         f"runtime contract {field}={contract.get(field)!r} expected {value!r}"
         for field, value in expected.items()

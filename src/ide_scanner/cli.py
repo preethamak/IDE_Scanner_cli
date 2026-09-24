@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Provenance label for --path inputs; never implies that a source snapshot equals a published VSIX.",
     )
     scan.add_argument("--profile", choices=["quick", "standard", "deep", "smart", "benchmark"], default="smart", help="Report label recorded in the bundle. Analysis depth is identical across profiles.")
-    scan.add_argument("--format", choices=["terminal", "json", "bundle.json", "report.zip", "sarif", "sqlite"], default=None, help="Output format. Defaults to a readable terminal brief interactively, JSON when piped, and report.zip when --output ends in .zip.")
+    scan.add_argument("--format", choices=["terminal", "json", "bundle.json", "report.zip"], default=None, help="Output format. Defaults to a readable terminal brief interactively, JSON when piped, and report.zip when --output ends in .zip.")
     scan.add_argument("--online", action="store_true", help=argparse.SUPPRESS)
     scan.add_argument("--offline", action="store_true", help="Disable registry and dependency vulnerability checks. Online checks (Marketplace removal list, OSV) are on by default because they are the only path to a confirmed-malware verdict.")
     scan.add_argument("--known-bad-hashes", help="JSON or line-based SHA-256 feed for known malicious artifacts.")
@@ -50,14 +50,13 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("--extension-advisories", help="Versioned JSON feed of exact extension vulnerability advisories. Defaults to the bundled snapshot.")
     scan.add_argument("--registry-snapshot", help="Replay registry and dependency intelligence captured in an earlier JSON report.")
     scan.add_argument("--sandbox-observations", help="JSON observations from an external sandbox run. The scanner imports this evidence but does not execute extensions.")
-    scan.add_argument("--runtime", action="store_true", help="Run a capability-gated dynamic pass for local or marketplace artifacts inside Bubblewrap; low-capability packages are recorded as not applicable.")
+    scan.add_argument("--runtime", action="store_true", help="Run a bounded Bubblewrap pass for resolvable activation entrypoints and sensitive capability surfaces; purely declarative packages are recorded as not applicable.")
     scan.add_argument("--runtime-timeout", type=int, default=15, help="Maximum seconds per controlled runtime action (1-300).")
     scan.add_argument("--previous-report", help="Previous ide-scanner JSON report to compare versions, dependencies, scores, and artifacts.")
     scan.add_argument("--skip-posture", action="store_true", help="Skip local IDE/client posture checks; useful for portable extension corpus scans.")
     scan.add_argument("--out", "--output", dest="output", help="Write report to this file.")
     scan.add_argument("--include-raw-evidence", action="store_true", help="Include raw evidence payloads in dashboard detail files.")
     scan.add_argument("--stream", action="store_true", help="Emit newline-delimited JSON scan events instead of a monolithic JSON report.")
-    scan.add_argument("--ui", action="store_true", help="Reserved for local dashboard mode.")
 
     inventory = subparsers.add_parser("inventory", help="List discovered extension paths without scanning.")
     inventory.add_argument("--all", action="store_true", help="List local VS Code-compatible extension installs.")
@@ -112,6 +111,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Exit non-zero when any required production gate fails.",
     )
+    benchmark_production.add_argument(
+        "--require-identity",
+        action="store_true",
+        help="Require a non-placeholder scanner build, policy, and ruleset identity in the report.",
+    )
+    benchmark_production.add_argument(
+        "--expected-scanner-build",
+        default=None,
+        help="Require the report scanner build to equal this immutable revision.",
+    )
 
     benchmark_holdout = benchmark_subparsers.add_parser(
         "holdout",
@@ -126,9 +135,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Do not require the report to prove runtime-enabled deep scanning (for offline calibration only).",
     )
     benchmark_holdout.add_argument(
+        "--behavior-only",
+        action="store_true",
+        help="Evaluate known-malicious artifacts for review-or-higher without exact advisory blocking; use as a shadow false-negative gate.",
+    )
+    benchmark_holdout.add_argument(
         "--fail-on-regression",
         action="store_true",
         help="Exit non-zero when the holdout gate fails.",
+    )
+    benchmark_holdout.add_argument(
+        "--require-identity",
+        action="store_true",
+        help="Require a non-placeholder scanner build, policy, and ruleset identity in the report.",
+    )
+    benchmark_holdout.add_argument(
+        "--expected-scanner-build",
+        default=None,
+        help="Require the report scanner build to equal this immutable revision.",
     )
 
     agent = subparsers.add_parser("agent", help="Run a local scan and upload the report to ide-scanner-web.")
@@ -149,8 +173,6 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "scan":
-        if args.ui:
-            parser.error("scan --ui is not implemented yet. Use `scan --installed --output report.zip` and import the bundle in ide-scanner-web.")
         if args.version and len(args.extension_id) != 1:
             parser.error("scan --version requires exactly one --extension-id")
         if args.target_platform and len(args.extension_id) != 1:
@@ -185,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
             dynamic_runtime=args.runtime,
             runtime_timeout_seconds=args.runtime_timeout,
         )
+        scan_exit_code = _scan_exit_code(report, profile=args.profile)
         output_format = _scan_output_format(args.output, args.format)
         source = _scan_source(args.installed, args.path, args.extension_id, args.fixtures)
         if args.stream:
@@ -201,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 output = str(receipt["output"])
             _emit_ndjson(iter_report_events(report, profile=args.profile, source=source, output=output))
-            return 0
+            return scan_exit_code
         if output_format == "report.zip":
             if not args.output:
                 parser.error("scan --format report.zip requires --output")
@@ -213,20 +236,18 @@ def main(argv: list[str] | None = None) -> int:
                 include_raw_evidence=args.include_raw_evidence,
             )
             _emit(receipt, None)
-            return 0
+            return scan_exit_code
         if output_format == "bundle.json":
             from .report_bundle import build_report_bundle
             _emit(build_report_bundle(report, profile=args.profile, source=source, include_raw_evidence=args.include_raw_evidence), args.output)
-            return 0
+            return scan_exit_code
         if output_format == "terminal":
             if args.output:
                 parser.error("scan --format terminal cannot write an output file; use --format report.zip or json.")
             _emit_terminal_brief(report)
-            return 0
-        if output_format in {"sarif", "sqlite"}:
-            parser.error(f"scan --format {output_format} is reserved but not implemented yet")
+            return scan_exit_code
         _emit(report, args.output)
-        return 0
+        return scan_exit_code
     if args.command == "artifacts":
         store = FilesystemArtifactStore(args.store)
         _emit({"artifacts": store.search(
@@ -254,7 +275,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if result.get("status") == "ready" else 2
     if args.command == "benchmark":
         if args.benchmark_command == "production":
-            result = evaluate_production_corpus(args.corpus, args.report)
+            result = evaluate_production_corpus(
+                args.corpus,
+                args.report,
+                require_identity=args.require_identity,
+                expected_scanner_build=args.expected_scanner_build,
+            )
             _emit(result, args.output)
             return 1 if args.fail_on_regression and not result["gate"]["passed"] else 0
         if args.benchmark_command == "holdout":
@@ -262,6 +288,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.corpus,
                 args.report,
                 require_runtime=not args.allow_static_only,
+                require_malicious_block=not args.behavior_only,
+                require_identity=args.require_identity,
+                expected_scanner_build=args.expected_scanner_build,
             )
             _emit(result, args.output)
             return 1 if args.fail_on_regression and not result["gate"]["passed"] else 0
@@ -334,6 +363,34 @@ def _scan_output_format(output: str | None, explicit_format: str | None) -> str:
     if output and output.lower().endswith(".zip"):
         return "report.zip"
     return "terminal" if sys.stdout.isatty() and not output else "json"
+
+
+def _scan_exit_code(report: dict[str, Any], *, profile: str) -> int:
+    """Fail closed for deep scans whose report cannot support publication.
+
+    Static profiles may still be useful for local triage when a provider is
+    unavailable. A deep scan is different: callers use its zero exit status
+    as evidence that the required runtime/provider coverage completed. Keep
+    the report on disk for diagnosis, but make CI and workers reject it.
+    """
+    if profile != "deep":
+        return 0
+    incomplete = [
+        extension
+        for extension in report.get("extensions", [])
+        if isinstance(extension, dict)
+        and (
+            str(extension.get("analysis_status") or "incomplete") != "complete"
+            or str(extension.get("decision") or "incomplete") == "incomplete"
+        )
+    ]
+    if incomplete:
+        print(
+            f"Deep scan incomplete for {len(incomplete)} extension(s); result is not publication-ready.",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
 
 
 def _emit_terminal_brief(report: dict[str, Any]) -> None:

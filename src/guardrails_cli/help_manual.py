@@ -8,8 +8,8 @@ OVERVIEW = """# Guardrails Local Scan
 
 Scan extensions installed in VS Code, Cursor, Windsurf, VSCodium, and VS Code
 Insiders with deterministic static analysis by default. Deep scans add a
-capability-gated Bubblewrap runtime; extension code is never executed on the
-host.
+capability-gated Bubblewrap runtime for resolvable executable entrypoints and
+sensitive capability surfaces; extension code is never executed on the host.
 
 ## Start here
 
@@ -71,10 +71,16 @@ Other artifacts:
   guardrails scan --file ./unpacked-extension
   guardrails scan --marketplace publisher.extension@1.2.3
 
+For deterministic CI or website/CLI parity, replay the exact versioned advisory
+snapshot used by the release gate:
+
+  guardrails scan --file extension.vsix \\
+    --extension-advisories extension-advisories.json
+
 Deep scans run the executable-capability portion of the exact artifact in a
 Bubblewrap namespace with networking disabled. This applies to Marketplace,
-local, uploaded, and installed-extension inputs. Themes and other packages
-without executable capability are recorded as not applicable. Use `--runtime`
+local, uploaded, and installed-extension inputs. Purely declarative packages
+without an executable entrypoint are recorded as not applicable. Use `--runtime`
 to request this pass outside the deep profile.
 
 Installed folders are copied into private temporary snapshots. Local extension
@@ -99,6 +105,9 @@ For an agent or a review system, use JSON:
     --marketplace publisher.extension@1.2.3 --format json --output brief.json
 
 Gate meanings:
+
+The same `--extension-advisories ADVISORIES.json` option is available on
+`guardrails brief` when comparing candidates against a frozen advisory feed.
 
   eligible_for_recommendation  Completed analysis found no decision-level evidence.
                                This is not proof that the artifact is safe.

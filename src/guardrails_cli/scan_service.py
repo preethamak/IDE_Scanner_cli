@@ -16,6 +16,7 @@ def scan_installed(
     *,
     profile: str = "standard",
     online: bool = False,
+    extension_advisories: str | Path | None = None,
     dynamic_runtime: bool = False,
     runtime_timeout_seconds: int = 20,
     progress: ProgressCallback | None = None,
@@ -27,7 +28,7 @@ def scan_installed(
     update(f"Creating private snapshots for {len(rows)} installation(s)…")
     with snapshot_installations(rows) as snapshot_rows:
         if dynamic_runtime or profile == "deep":
-            update("Analyzing extension packages with static checks and capability-gated Bubblewrap runtime…")
+            update("Analyzing extension packages with static checks and capability-gated Bubblewrap runtime for executable entrypoints…")
         else:
             update("Analyzing extension packages with deterministic static checks…")
         report = run_with_profile(
@@ -35,6 +36,7 @@ def scan_installed(
             lambda required_providers: scan_paths(
                 [row["path"] for row in snapshot_rows],
                 online=online or profile == "deep",
+                extension_advisories=extension_advisories,
                 required_providers=required_providers,
                 dynamic_runtime=dynamic_runtime or profile == "deep",
                 runtime_timeout_seconds=runtime_timeout_seconds,

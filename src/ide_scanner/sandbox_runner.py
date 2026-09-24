@@ -35,12 +35,14 @@ CANARY_FILES = (
 MAX_RUNTIME_FILES = 100_000
 MAX_RUNTIME_BYTES = 2 * 1024 * 1024 * 1024
 MAX_RUNTIME_FILE_BYTES = 512 * 1024 * 1024
+MAX_RUNTIME_COMPRESSION_RATIO = 100
 MAX_RUNTIME_TIMEOUT_SECONDS = 300
 MAX_RUNTIME_MEMORY_BYTES = 1536 * 1024 * 1024
 MAX_RUNTIME_OPEN_FILES = 4096
 MAX_RUNTIME_OUTPUT_BYTES = 4 * 1024 * 1024
 RUNTIME_OUTPUT_CHUNK_BYTES = 64 * 1024
 MAX_EXTERNAL_TRACE_BYTES = 8 * 1024 * 1024
+MAX_PERSISTED_RUNTIME_VALUE_BYTES = 512
 EXTERNAL_TRACE_ENV = "GUARDRAILS_RUNTIME_EXTERNAL_TRACE"
 RUNTIME_BWRAP_SUDO_ENV = "GUARDRAILS_RUNTIME_BWRAP_SUDO"
 RUNTIME_EVENT_HANDSHAKE = "GUARDRAILS_RUNTIME_HANDSHAKE_V1:"
@@ -77,7 +79,16 @@ _SANDBOX_SETUP_DEVICE_PATHS = frozenset({
 _SANDBOX_BOOTSTRAP_EXECUTABLES = frozenset({
     "/usr/bin/sudo",
     "/usr/bin/bwrap",
+    "/usr/bin/strace",
 })
+_RUNTIME_QUERY_SECRET_RE = re.compile(
+    r"(?i)([?&](?:access[_-]?token|api[_-]?key|auth(?:orization)?|code|key|password|passwd|secret|sig(?:nature)?|token)=)[^&#\s]+"
+)
+_RUNTIME_BEARER_RE = re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]+")
+_RUNTIME_ARGUMENT_SECRET_RE = re.compile(
+    r"(?i)(--?(?:access[_-]?token|api[_-]?key|auth(?:orization)?|password|passwd|secret|token)(?:=|\s+))[^\s]+"
+)
+_RUNTIME_USERINFO_RE = re.compile(r"(?i)(//)[^/@\s]+@")
 
 
 def _external_trace_requested() -> bool:
@@ -168,6 +179,7 @@ def sandbox_preflight(timeout_seconds: int = 10) -> dict[str, Any]:
         "--tmpfs", "/tmp",
         "--clearenv",
         "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "--chdir", "/",
         "--",
         "/bin/true",
     ]
@@ -334,6 +346,7 @@ def run_sandbox(path: Path, allow_execute: bool = False, timeout_seconds: int = 
                 "max_files": MAX_RUNTIME_FILES,
                 "max_total_bytes": MAX_RUNTIME_BYTES,
                 "max_file_bytes": MAX_RUNTIME_FILE_BYTES,
+                "max_compression_ratio": MAX_RUNTIME_COMPRESSION_RATIO,
                 "max_memory_bytes": MAX_RUNTIME_MEMORY_BYTES,
                 "timeout_seconds_per_action": timeout_seconds,
             },
@@ -592,7 +605,12 @@ def _execute_entrypoint(
         }]
         observations[0] = {key: value for key, value in observations[0].items() if value is not None}
         if result.returncode != 0 and result.stderr:
-            observations[0]["stderr_excerpt"] = result.stderr[-2000:]
+            # Extension stderr is attacker-controlled and may contain secrets
+            # or synthetic canary values. Keep a reproducible fingerprint and
+            # size for diagnostics, never the raw text in a persisted report.
+            stderr_bytes = result.stderr.encode("utf-8", errors="replace")
+            observations[0]["stderr_sha256"] = hashlib.sha256(stderr_bytes).hexdigest()
+            observations[0]["stderr_bytes"] = len(stderr_bytes)
         observations.extend(_observations_from_events(events, canary_files or []))
         observations.extend(external_observations)
         if not transport_ok:
@@ -1687,13 +1705,20 @@ def _external_trace_observations(
                     "api": f"strace.{syscall}",
                 })
         elif syscall in {"connect", "sendto", "sendmsg", "sendmmsg", "bind"}:
+            destination = _strace_network_destination(line)
+            # Bubblewrap and the host runtime use netlink/unspecified sockets
+            # while constructing the isolated namespace. Without an explicit
+            # address, those syscalls are infrastructure evidence rather than
+            # proof that the extension attempted a network operation.
+            if not destination:
+                continue
             observations.append({
                 "kind": "network_attempt",
-                "destination": "external-syscall",
+                "destination": destination,
                 "api": f"strace.{syscall}",
             })
         elif syscall in {"execve", "execveat"}:
-            if path in _SANDBOX_BOOTSTRAP_EXECUTABLES:
+            if _is_sandbox_bootstrap_exec(line, path):
                 continue
             observations.append({
                 "kind": "process_exec",
@@ -1713,6 +1738,23 @@ def _external_trace_observations(
     return _dedupe_observations(observations), True
 
 
+def _is_sandbox_bootstrap_exec(line: str, path: str) -> bool:
+    """Exclude scanner-owned launches while retaining extension children.
+
+    The external tracer observes the complete parent-owned command, including
+    Bubblewrap, the tracer/privilege wrapper, and the instrumented activation
+    runner's Node process. Those launches are required to run the scan and are
+    not extension behavior. Do not blanket-ignore shells or Node: an
+    extension-spawned child must remain observable. The argument marker below
+    identifies only the scanner-owned activation runner.
+    """
+    if path in _SANDBOX_BOOTSTRAP_EXECUTABLES:
+        return True
+    if Path(path).name != "node":
+        return False
+    return "/runner/activate-entrypoint.js" in line
+
+
 def _is_sandbox_setup_path(path: str) -> bool:
     """Return whether a traced path belongs to Bubblewrap's own setup.
 
@@ -1728,6 +1770,29 @@ def _is_sandbox_setup_path(path: str) -> bool:
     )
 
 
+def _strace_network_destination(line: str) -> str | None:
+    """Extract a real socket destination from an external syscall line.
+
+    Strace emits kernel-control traffic with ``AF_NETLINK`` or ``AF_UNSPEC``
+    and no application destination. Returning ``None`` for those records keeps
+    namespace setup out of the extension's behavioral evidence. For real
+    sockets, retain the bounded address/path so reports explain what was
+    attempted rather than emitting the opaque ``external-syscall`` token.
+    """
+    if re.search(r"\b(?:AF_NETLINK|AF_UNSPEC)\b", line):
+        return None
+    match = re.search(r'inet_addr\("([^"\\]*(?:\\.[^"\\]*)*)"\)', line)
+    if match:
+        return match.group(1)
+    match = re.search(r'inet_pton\([^,]+,\s*"([^"\\]*(?:\\.[^"\\]*)*)"\)', line)
+    if match:
+        return match.group(1)
+    match = re.search(r'sun_path="([^"\\]*(?:\\.[^"\\]*)*)"', line)
+    if match:
+        return match.group(1)
+    return None
+
+
 def _first_strace_string(line: str) -> str:
     match = re.search(r'"(?:\\.|[^"\\])*"', line)
     if not match:
@@ -1737,6 +1802,18 @@ def _first_strace_string(line: str) -> str:
     except (SyntaxError, ValueError):
         return ""
     return value if isinstance(value, str) else ""
+
+
+def _redact_runtime_value(value: Any) -> str:
+    """Keep runtime evidence useful without persisting extension-supplied secrets."""
+    text = str(value or "")
+    text = _RUNTIME_USERINFO_RE.sub(r"\1[redacted]@", text)
+    text = _RUNTIME_QUERY_SECRET_RE.sub(r"\1[redacted]", text)
+    text = _RUNTIME_BEARER_RE.sub(r"\1[redacted]", text)
+    text = _RUNTIME_ARGUMENT_SECRET_RE.sub(r"\1[redacted]", text)
+    if len(text) > MAX_PERSISTED_RUNTIME_VALUE_BYTES:
+        text = text[:MAX_PERSISTED_RUNTIME_VALUE_BYTES] + "…"
+    return text
 
 
 def _observations_from_trace(trace_file: Path, canary_files: list[str]) -> list[dict[str, Any]]:
@@ -1767,33 +1844,36 @@ def _observations_from_events(events: list[dict[str, Any]], canary_files: list[s
                     "api": event.get("api"),
                 })
         elif kind in {"network", "dns"}:
+            destination = _redact_runtime_value(event.get("target") or event.get("api") or "unknown")
             observations.append({
                 "kind": "network_attempt",
-                "destination": event.get("target") or event.get("api") or "unknown",
+                "destination": destination,
                 "api": event.get("api"),
             })
         elif kind == "network_write":
             contains_canary = bool(event.get("contains_canary"))
+            destination = _redact_runtime_value(event.get("target") or "unknown")
             observations.append({
                 "kind": "runtime_network_write",
                 "contains_canary": contains_canary,
                 "bytes": event.get("bytes"),
-                "destination": event.get("target") or "unknown",
+                "destination": destination,
             })
             if contains_canary:
                 observations.append({
                     "kind": "secret_exfil",
-                    "destination": event.get("target") or "unknown",
+                    "destination": destination,
                     "evidence": "runtime trace observed the canary value in a network request body",
                 })
         elif kind == "process_exec":
-            command = str(event.get("command") or "")
+            raw_command = str(event.get("command") or "")
+            command = _redact_runtime_value(raw_command)
             observations.append({
                 "kind": "process_exec",
                 "command": command,
                 "api": event.get("api"),
             })
-            if any(token in command.lower() for token in ("curl", "wget", "powershell", "bash", "sh ")) and any(token in command.lower() for token in ("http://", "https://")):
+            if any(token in raw_command.lower() for token in ("curl", "wget", "powershell", "bash", "sh ")) and any(token in raw_command.lower() for token in ("http://", "https://")):
                 observations.append({
                     "kind": "download_execute",
                     "command": command,
@@ -1825,7 +1905,7 @@ def _observations_from_events(events: list[dict[str, Any]], canary_files: list[s
             observation = {"kind": f"runtime_{kind}"}
             for key in ("command", "error"):
                 if key in event:
-                    observation[key] = event[key]
+                    observation[key] = _redact_runtime_value(event[key])
             observations.append(observation)
     return _dedupe_observations(observations)
 
@@ -1859,20 +1939,33 @@ def _prepare_target(source: Path, destination: Path) -> Path:
             if len(members) > MAX_RUNTIME_FILES:
                 raise ValueError(f"Sandbox archive exceeds the {MAX_RUNTIME_FILES}-file limit")
             total_bytes = 0
+            compressed_bytes = 0
+            member_names: set[str] = set()
             for member in members:
                 name = member.filename.replace("\\", "/")
                 if not name or name.endswith("/"):
                     continue
+                if name in member_names:
+                    raise ValueError(f"Sandbox archive contains duplicate member: {name}")
+                member_names.add(name)
                 if member.flag_bits & 0x1:
                     raise ValueError("Sandbox refuses encrypted VSIX members")
                 if member.file_size < 0 or member.file_size > MAX_RUNTIME_FILE_BYTES:
                     raise ValueError(f"Sandbox archive member exceeds the {MAX_RUNTIME_FILE_BYTES}-byte limit")
                 total_bytes += member.file_size
+                compressed_bytes += max(1, member.compress_size)
                 if total_bytes > MAX_RUNTIME_BYTES:
                     raise ValueError(f"Sandbox archive exceeds the {MAX_RUNTIME_BYTES}-byte extraction limit")
                 target = (destination / name).resolve()
                 if destination.resolve() not in target.parents and target != destination.resolve():
                     raise ValueError("Sandbox archive contains a path traversal member")
+            if total_bytes / max(1, compressed_bytes) > MAX_RUNTIME_COMPRESSION_RATIO:
+                raise ValueError("Sandbox archive compression ratio exceeds the extraction limit")
+            for member in members:
+                name = member.filename.replace("\\", "/")
+                if not name or name.endswith("/"):
+                    continue
+                target = (destination / name).resolve()
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as src, target.open("wb") as dst:
                     while True:

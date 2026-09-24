@@ -34,6 +34,7 @@ Common commands:
 guardrails scan --ide cursor --all --yes
 guardrails scan --extension publisher.extension
 guardrails scan --file extension.vsix
+guardrails scan --file extension.vsix --extension-advisories extension-advisories.json
 guardrails brief --purpose "read and edit plist files" --marketplace ivhernandez.vscode-plist --marketplace mariano-g.plist-editor
 guardrails inventory --ide cursor --output team-inventory.json
 guardrails report verify report.zip
@@ -72,6 +73,10 @@ If the isolated runtime or any required provider is unavailable, the result is
 
 Missing required analysis produces `INCOMPLETE`, never `ALLOW`.
 
+For reproducible CI and website/CLI parity, `--extension-advisories` replays a
+versioned exact-extension advisory snapshot. The snapshot identity and hash are
+retained in the report; the scanner never silently substitutes a live feed.
+
 ## Engine integrity
 
 The scanner runtime remains bundled inside Guardrails. Its exact source
@@ -88,7 +93,7 @@ Installed extensions are analyzed from private temporary snapshots. Extension
 code is not executed or uploaded. Files remain local unless a report is
 explicitly exported.
 
-Website: [ide-scanner.vercel.app](https://ide-scanner.vercel.app)
+Website: [abscissa.dev](https://abscissa.dev)
 
 ## License
 

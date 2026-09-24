@@ -6,7 +6,7 @@ import unittest
 from os import terminal_size
 from unittest.mock import patch
 
-from guardrails_cli.ui.renderers import render_scan_report
+from guardrails_cli.ui.renderers import render_extension_summary, render_scan_report
 from guardrails_cli.ui.panels import LOGO_PIXELS, banner, compact_logo_lines, logo_lines
 from guardrails_cli.ui.tables import ANSI_RE, table, visible_len
 from guardrails_cli.ui.theme import color, severity_label
@@ -17,6 +17,23 @@ ALLOWED_SEVERITY_EMOJI: set[str] = set()
 
 
 class CliUiTests(unittest.TestCase):
+    def test_extension_summary_separates_actionable_and_context_only_counts(self) -> None:
+        output = render_extension_summary([{
+            "extension_id": "example.extension",
+            "version": "1.0.0",
+            "client": "VS Code",
+            "decision": "allow",
+            "risk_score": 0,
+            "coverage_percent": 100,
+            "findings": [
+                {"rule_id": "credential-exfiltration-chain", "actionability": "review", "severity": "HIGH"},
+                {"rule_id": "process-execution", "actionability": "contextual", "severity": "HIGH", "effective_severity": "INFO"},
+            ],
+        }], show_all=True)
+
+        self.assertIn("1 action-level · 1 context-only", output)
+        self.assertNotIn("2 finding(s)", output)
+
     def test_table_respects_requested_width(self) -> None:
         output = table(
             ["Rule", "Meaning"],

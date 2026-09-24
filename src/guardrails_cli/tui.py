@@ -6,7 +6,7 @@ from typing import Any
 
 from rich.markdown import Markdown as RichMarkdown
 from rich.text import Text
-from guardrails_cli.presentation import finding_severity, severity_detail
+from guardrails_cli.presentation import finding_severity, rank_findings, severity_detail, split_findings
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -724,11 +724,19 @@ class GuardrailsApp(App[TuiResult | None]):
         maximum_risk = max((int(item.get("risk_score") or 0) for item in extensions), default=0)
         maximum_malware = max((int(item.get("malware_score") or 0) for item in extensions), default=0)
         average_coverage = round(sum(_coverage(item) for item in extensions) / len(extensions)) if extensions else 0
-        finding_count = sum(len(item.get("findings") or []) for item in extensions)
+        all_findings = [
+            finding
+            for item in extensions
+            for finding in item.get("findings", [])
+            if isinstance(finding, dict)
+        ]
+        actionable_findings, contextual_findings = split_findings(all_findings)
         self.query_one("#risk-score", Static).update(_gauge("RISK SCORE", maximum_risk, "#f5b942"))
         self.query_one("#malware-score", Static).update(_gauge("MALWARE SCORE", maximum_malware, "#ff5a68"))
         self.query_one("#coverage-score", Static).update(_gauge("COVERAGE", average_coverage, "#17aefd", suffix="%"))
-        self.query_one("#finding-score", Static).update(_finding_card(finding_count, len(extensions)))
+        self.query_one("#finding-score", Static).update(
+            _finding_card(len(all_findings), len(actionable_findings), len(contextual_findings), len(extensions))
+        )
         self._populate_result_table(extensions)
         self.query_one("#export-receipt").display = False
         self._show_view("results")
@@ -992,10 +1000,11 @@ def _gauge(label: str, value: int, gauge_color: str, *, suffix: str = "/100") ->
     return output
 
 
-def _finding_card(findings: int, extensions: int) -> Text:
+def _finding_card(findings: int, actionable: int, contextual: int, extensions: int) -> Text:
     output = Text("FINDINGS", style="bold #8fa0ad")
     output.append(f"\n{findings}", style="bold #eef3f6")
     output.append(f"\nacross {extensions} installation{'s' if extensions != 1 else ''}", style="#8fa0ad")
+    output.append(f"\n{actionable} action-level · {contextual} contextual", style="#8fa0ad")
     return output
 
 
@@ -1047,10 +1056,11 @@ def _extension_report_text(extension: dict[str, Any]) -> Text:
         output.append("Provider detail was not recorded.\n", style="#8fa0ad")
 
     findings = [item for item in extension.get("findings", []) if isinstance(item, dict)]
-    output.append(f"\nFINDINGS ({len(findings)})\n", style="bold #c9ff45")
-    if not findings:
-        output.append("No findings were reported for this artifact.\n", style="#47c978")
-    for index, finding in enumerate(_rank_findings(findings), start=1):
+    actionable, contextual = split_findings(findings)
+    output.append(f"\nFINDINGS ({len(actionable)} action-level)\n", style="bold #c9ff45")
+    if not actionable:
+        output.append("No action-level findings were reported for this artifact.\n", style="#47c978")
+    for index, finding in enumerate(actionable, start=1):
         effective_severity = finding_severity(finding)
         severity = severity_detail(finding)
         rule = str(finding.get("rule_id") or "unknown-rule")
@@ -1065,6 +1075,16 @@ def _extension_report_text(extension: dict[str, Any]) -> Text:
         if references:
             output.append(f"  ·  {references[0]}", style="#17aefd")
         output.append("\n")
+
+    if contextual:
+        output.append(f"\nCONTEXTUAL OBSERVATIONS ({len(contextual)})\n", style="bold #8fa0ad")
+        output.append("These observations did not change the decision.\n", style="#8fa0ad")
+        for finding in contextual[:6]:
+            output.append(f"{severity_detail(finding)}  ", style=f"bold {_severity_color(finding_severity(finding))}")
+            output.append(str(finding.get("rule_id") or "unknown-rule") + "\n", style="bold #eef3f6")
+            output.append(str(finding.get("evidence_summary") or "No evidence summary was recorded.") + "\n", style="#8fa0ad")
+        if len(contextual) > 6:
+            output.append(f"{len(contextual) - 6} additional contextual observation(s) are retained in exported report data.\n", style="#8fa0ad")
 
     output.append("\nARTIFACT IDENTITY\n", style="bold #c9ff45")
     output.append(f"SHA-256  {artifact_sha}\n", style="#8fa0ad")
@@ -1082,8 +1102,7 @@ def _inline_bar(label: str, value: int, bar_color: str, *, suffix: str = "/100")
 
 
 def _rank_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    priority = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1}
-    return sorted(findings, key=lambda item: priority.get(finding_severity(item), 0), reverse=True)
+    return rank_findings(findings)
 
 
 def _severity_color(severity: str) -> str:

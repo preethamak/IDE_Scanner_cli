@@ -4,7 +4,7 @@ import textwrap
 from typing import Any
 
 from guardrails_cli import __version__
-from guardrails_cli.presentation import finding_severity, severity_detail
+from guardrails_cli.presentation import severity_detail, split_findings
 
 from .panels import banner, panel, section
 from .tables import key_values, table, terminal_width, truncate
@@ -12,7 +12,6 @@ from .theme import color, severity_label, severity_style, verdict_style
 
 
 DECISION_RANK = {"block": 4, "incomplete": 3, "review": 2, "allow": 1}
-SEVERITY_RANK = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1}
 
 
 def render_scan_report(report: dict[str, Any], *, show_all: bool = False) -> str:
@@ -98,7 +97,12 @@ def _result_row(extension: dict[str, Any]) -> list[str]:
         lines = [f"{prefix} {truncate(identity, max(20, width - 28))}  {color(client, 'gray')}"]
         indent = " " * 11
     lines.extend(indent + part for part in _wrap(reason, max(16, width - len(indent))))
-    facts = f"coverage {_coverage(extension)}% · risk {int(extension.get('risk_score') or 0)}/100 · {len(extension.get('findings') or [])} finding(s)"
+    findings = [item for item in extension.get("findings", []) if isinstance(item, dict)]
+    actionable, contextual = split_findings(findings)
+    facts = (
+        f"coverage {_coverage(extension)}% · risk {int(extension.get('risk_score') or 0)}/100 · "
+        f"{len(actionable)} action-level · {len(contextual)} context-only"
+    )
     lines.append(indent + color(truncate(facts, max(12, width - len(indent))), "gray"))
     lines.append("")
     return lines
@@ -148,9 +152,9 @@ def render_provider_coverage(extension: dict[str, Any]) -> str:
 
 
 def render_findings(findings: list[dict[str, Any]]) -> str:
-    ranked = sorted(findings, key=lambda item: (SEVERITY_RANK.get(finding_severity(item), 0), _confidence(item.get("confidence"))), reverse=True)
+    actionable, contextual = split_findings(findings)
     lines = [section("Highest-priority evidence")]
-    for finding in ranked[:10]:
+    for finding in actionable[:10]:
         severity = severity_detail(finding)
         rule = str(finding.get("rule_id") or "unknown-rule")
         summary = str(finding.get("evidence_summary") or "No summary recorded.")
@@ -161,8 +165,26 @@ def render_findings(findings: list[dict[str, Any]]) -> str:
         detail = evidence_class + (f" · {refs[0]}" if refs else "")
         lines.append("  " + color(truncate(detail, max(12, terminal_width() - 2)), "gray"))
         lines.append("")
-    if len(ranked) > 10:
-        lines.append(color(f"{len(ranked) - 10} more finding(s) are available in exported report data.", "gray"))
+    if not actionable:
+        lines.append(color("No action-level evidence was reported.", "green"))
+    elif len(actionable) > 10:
+        lines.append(color(f"{len(actionable) - 10} more action-level finding(s) are available in exported report data.", "gray"))
+
+    if contextual:
+        lines.append(section("Contextual observations"))
+        lines.append(color(
+            f"{len(contextual)} context-only observation(s); these did not change the decision.",
+            "gray",
+        ))
+        for finding in contextual[:3]:
+            severity = severity_detail(finding)
+            rule = str(finding.get("rule_id") or "unknown-rule")
+            summary = str(finding.get("evidence_summary") or "No summary recorded.")
+            lines.append(f"{_severity_text(severity):<12} {truncate(rule, max(12, terminal_width() - 14))}")
+            lines.extend("  " + part for part in _wrap(summary, max(16, terminal_width() - 2)))
+            lines.append("")
+        if len(contextual) > 3:
+            lines.append(color(f"{len(contextual) - 3} additional contextual observation(s) are retained in exported report data.", "gray"))
     return "\n".join(lines).rstrip()
 
 
@@ -227,10 +249,3 @@ def _severity_text(severity: str) -> str:
 def _evidence_class(finding: dict[str, Any]) -> str:
     evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
     return str(evidence.get("evidence_class") or "unknown")
-
-
-def _confidence(value: object) -> float:
-    try:
-        return float(value or 0)
-    except (TypeError, ValueError):
-        return {"low": 0.3, "medium": 0.6, "high": 0.9}.get(str(value).lower(), 0)

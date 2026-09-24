@@ -179,11 +179,18 @@ def _icon_path(path: Path, manifest: dict[str, Any]) -> str:
 
 
 def _finding_summary(finding: dict[str, Any]) -> dict[str, Any]:
+    detector_severity = str(finding.get("severity") or "INFO")
     return {
         "finding_id": finding.get("finding_id"),
         "rule_id": finding.get("rule_id"),
         "category": finding.get("category"),
-        "severity": finding.get("severity"),
+        # The CLI summary is a user-facing view. Use the same policy-normalized
+        # severity and actionability as the report bundle so a contextual raw
+        # HIGH detector signal cannot look like an actionable alert.
+        "severity": str(finding.get("effective_severity") or detector_severity),
+        "detector_severity": detector_severity,
+        "evidence_class": str(finding.get("evidence_class") or "weak"),
+        "actionability": str(finding.get("actionability") or "contextual"),
         "confidence": finding.get("confidence"),
         "evidence_summary": finding.get("evidence_summary"),
         "file_refs": list(finding.get("file_refs") or []),
@@ -209,15 +216,24 @@ def _finding_counts(extensions: list[dict[str, Any]]) -> dict[str, Any]:
     by_rule: dict[str, int] = {}
     by_category: dict[str, int] = {}
     by_severity: dict[str, int] = {}
+    by_detector_severity: dict[str, int] = {}
+    by_actionability: dict[str, int] = {}
     for extension in extensions:
         for finding in extension.get("findings") or []:
             _increment(by_rule, str(finding.get("rule_id") or "unknown"))
             _increment(by_category, str(finding.get("category") or "unknown"))
-            _increment(by_severity, str(finding.get("severity") or "unknown"))
+            _increment(
+                by_severity,
+                str(finding.get("effective_severity") or finding.get("severity") or "unknown"),
+            )
+            _increment(by_detector_severity, str(finding.get("severity") or "unknown"))
+            _increment(by_actionability, str(finding.get("actionability") or "contextual"))
     return {
         "by_rule": dict(sorted(by_rule.items(), key=lambda item: (-item[1], item[0]))),
         "by_category": dict(sorted(by_category.items(), key=lambda item: (-item[1], item[0]))),
         "by_severity": dict(sorted(by_severity.items(), key=lambda item: (-item[1], item[0]))),
+        "by_detector_severity": dict(sorted(by_detector_severity.items(), key=lambda item: (-item[1], item[0]))),
+        "by_actionability": dict(sorted(by_actionability.items(), key=lambda item: (-item[1], item[0]))),
     }
 
 

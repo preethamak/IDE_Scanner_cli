@@ -7,6 +7,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .providers.runtime import safe_child_environment
+
 JS_AST_EXTS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
 _WALKER_PATH = Path(__file__).parent / "js_ast" / "walker.js"
 # Keep AST work below the scanner's overall text boundary. Acorn's in-memory
@@ -63,6 +65,7 @@ def analyze_js_source_status(rel: str, text: str) -> tuple[list[dict[str, Any]],
                         capture_output=True,
                         text=True,
                         timeout=JS_AST_TIMEOUT_SECONDS,
+                        env=safe_child_environment(),
                     )
                     break
                 except subprocess.TimeoutExpired:

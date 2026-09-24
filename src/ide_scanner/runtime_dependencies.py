@@ -85,12 +85,22 @@ def provision_for_extension(target: Path, manifest: dict[str, Any]) -> list[dict
 
     packaged = target / "server" / "rust-analyzer"
     if packaged.is_file() and os.access(packaged, os.X_OK):
+        actual = _sha256(packaged)
+        if actual != lock["binary_sha256"]:
+            return [{
+                "dependency": lock["dependency"],
+                "status": "packaged-hash-mismatch",
+                "required": True,
+                "version": lock["version"],
+                "expected_sha256": lock["binary_sha256"],
+                "actual_sha256": actual,
+            }]
         return [{
             "dependency": lock["dependency"],
             "status": "packaged",
             "required": True,
             "version": lock["version"],
-            "sha256": _sha256(packaged),
+            "sha256": actual,
         }]
 
     cache_path = _default_cache_root() / lock["cache_subpath"]

@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "policy_version": "3.1.0-calibration.5",
+  "policy_version": "3.1.0-calibration.7",
   "description": "Versioned scoring thresholds. Verdict authority gates remain in classification_policy.py and scanner.py.",
   "components": {
     "confirmed_intelligence": {
@@ -35,6 +35,7 @@
       "credential-harvesting-exfiltration": 89,
       "obfuscated-credential-harvesting-exfiltration": 91,
       "credential-identifier-flow-to-network": 90,
+      "environment-data-exfiltration": 88,
       "destructive-transfer-chain": 83,
       "obfuscation-execution-network": 80,
       "persistence-chain": 82,

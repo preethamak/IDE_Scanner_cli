@@ -4,7 +4,17 @@
 
 Guardrails CLI is an installed-extension security scanner first. Marketplace and local package scans are secondary acquisition paths. It uses a pinned canonical scanner-engine commit so an exact artifact analyzed with the same profile and provider set can be compared with the website Deep Scan.
 
-Extension code is never executed. Installed folders are copied into private, bounded temporary snapshots before analysis. Reports record artifact SHA-256, engine build, ruleset, profile, provider status, and installation identity.
+Extension code is never executed on the host. Deep scans may execute required
+capability paths only inside the network-disabled, capability-gated Bubblewrap
+runtime; a missing or failed runtime produces INCOMPLETE. Installed folders are
+copied into private, bounded temporary snapshots before analysis. Reports record
+artifact SHA-256, engine build, ruleset, profile, provider status, and
+installation identity.
+
+The optional `--extension-advisories ADVISORIES.json` input replays a versioned,
+exact-extension advisory snapshot. This is the supported way to reproduce the
+same threat-intelligence boundary in CI, the website, and the CLI; a report
+retains the snapshot identity rather than silently querying a moving feed.
 
 ## Primary flow
 

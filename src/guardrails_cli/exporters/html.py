@@ -6,7 +6,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
-from guardrails_cli.presentation import severity_detail
+from guardrails_cli.presentation import finding_actionability, severity_detail, split_findings
 
 from ._atomic import write_text
 
@@ -49,7 +49,7 @@ def to_html(report: dict[str, Any]) -> str:
   <header><div class="brand">{_logo_html()}<div><h1>Guardrails</h1><p class="sub">Local IDE extension report</p></div></div><div class="identity"><code>{_escape(scan_id)}</code><br>{_escape(metadata.get('created_at') or report.get('created_at', ''))}</div></header>
   <section class="stats">{_stat('Extensions',len(extensions))}{_stat('Allow',counts['allow'])}{_stat('Review',counts['review'])}{_stat('Block / incomplete',counts['block'] + counts['incomplete'])}</section>
   {rows or '<p>No extension results were recorded.</p>'}
-  <footer>Generated locally by Guardrails. Extension code was not executed by the scanner.</footer>
+  <footer>Generated locally by Guardrails. Runtime execution is only used when the selected scan profile enables controlled analysis; coverage is recorded above.</footer>
 </main></body></html>"""
 
 
@@ -59,17 +59,34 @@ def _extension_html(extension: dict[str, Any]) -> str:
     artifact = extension.get("artifact_identity") if isinstance(extension.get("artifact_identity"), dict) else {}
     sha = extension.get("artifact_sha256") or artifact.get("sha256") or extension.get("artifact_hash") or "unavailable"
     findings = [item for item in extension.get("findings", []) if isinstance(item, dict)]
-    finding_rows = "".join(
-        f"<tr><td>{_escape(severity_detail(item))}</td><td><code>{_escape(item.get('rule_id',''))}</code></td><td>{_escape(item.get('evidence_class') or 'unknown')}</td><td>{_escape(item.get('evidence_summary',''))}</td></tr>"
-        for item in findings[:50]
-    ) or '<tr><td colspan="4">No findings reported.</td></tr>'
+    actionable, contextual = split_findings(findings)
+    finding_rows = "".join(_finding_row(item) for item in actionable[:50]) or '<tr><td colspan="5">No action-level findings reported.</td></tr>'
+    contextual_rows = "".join(_finding_row(item) for item in contextual[:50])
+    contextual_section = (
+        f'<h3>Contextual observations ({len(contextual)})</h3>'
+        '<p class="reason">These observations describe extension capabilities or packaging context; they did not change the decision.</p>'
+        f'<table><thead><tr><th>Actionability</th><th>Severity</th><th>Rule</th><th>Evidence</th><th>Summary</th></tr></thead><tbody>{contextual_rows}</tbody></table>'
+        if contextual else ""
+    )
     reason = extension.get("decision_reason") or extension.get("verdict_reason") or "No explanation was recorded."
     return f"""<article class="extension">
       <div class="extension-head"><div><h2>{_escape(extension.get('name') or extension.get('extension_id') or 'Unknown extension')}</h2><code>{_escape(extension.get('extension_id','unknown'))}@{_escape(extension.get('version','unknown'))}</code></div><span class="decision {decision}">{decision.upper()}</span></div>
       <div class="facts">{_fact('IDE',_ide_label(extension.get('client') or extension.get('source') or 'local'))}{_fact('Coverage',str(int(extension.get('coverage_percent') if extension.get('coverage_percent') is not None else coverage.get('coverage_percent') or 0))+'%')}{_fact('Risk',str(int(extension.get('risk_score') or 0))+'/100')}{_fact('Malware evidence',str(int(extension.get('malware_score') or 0))+'/100')}{_fact('Artifact SHA-256',str(sha)[:18]+'…' if len(str(sha))>18 else sha)}</div>
       <p class="reason">{_escape(reason)}</p>
-      <table><thead><tr><th>Severity</th><th>Rule</th><th>Evidence</th><th>Summary</th></tr></thead><tbody>{finding_rows}</tbody></table>
+      <table><thead><tr><th>Actionability</th><th>Severity</th><th>Rule</th><th>Evidence</th><th>Summary</th></tr></thead><tbody>{finding_rows}</tbody></table>
+      {contextual_section}
     </article>"""
+
+
+def _finding_row(finding: dict[str, Any]) -> str:
+    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+    return (
+        f"<tr><td>{_escape(finding_actionability(finding))}</td>"
+        f"<td>{_escape(severity_detail(finding))}</td>"
+        f"<td><code>{_escape(finding.get('rule_id', ''))}</code></td>"
+        f"<td>{_escape(finding.get('evidence_class') or evidence.get('evidence_class') or 'unknown')}</td>"
+        f"<td>{_escape(finding.get('evidence_summary', ''))}</td></tr>"
+    )
 
 
 def _stat(label: str, value: object) -> str:

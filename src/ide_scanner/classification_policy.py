@@ -97,6 +97,16 @@ def finding_actionability(finding: Any) -> FindingActionability:
             return "low"
         return "review"
     if evidence_class == "posture":
+        if (
+            rule_id == "executable-heavy-obfuscation"
+            and str(_evidence(finding).get("scope") or "") == "secondary-generated"
+        ):
+            # A generated worker/library that is not an activation entrypoint
+            # is still retained in the report and artifact-wide YARA scan, but
+            # obfuscation alone is not enough to send every legitimate bundled
+            # dependency to manual review. The declared runtime entrypoint
+            # remains review-worthy.
+            return "low"
         return "review" if rule_id in _REVIEW_POSTURE_RULES else "low"
     if evidence_class == "exposure":
         if rule_id in _CONTEXTUAL_EXPOSURE_RULES:

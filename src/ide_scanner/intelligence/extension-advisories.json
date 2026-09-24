@@ -1,5 +1,5 @@
 {
-  "snapshot_version": "2026-09-19.6",
+  "snapshot_version": "2026-09-22.1",
   "entries": [
     {
       "extension_id": "nrwl.angular-console",
@@ -172,6 +172,18 @@
       "threat_classification": "malicious",
       "source": "https://www.knostic.ai/blog/analyzing-two-malicious-vs-code-extensions-hidden-behind-a-wordpress-tool",
       "summary": "Knostic reported this exact Marketplace artifact as an auto-starting downloader that launches an external MSI installer."
+    },
+    {
+      "extension_id": "AzureCdnInfo.edrtester",
+      "version": "1.0.4",
+      "artifact_sha256": "d4101a5bc86747f499ef347548e92eb3e1b09ce6acaf34bd1ee07f66400b18af",
+      "advisory_id": "CLR-2026-3045",
+      "severity": "CRITICAL",
+      "published_at": "2026-09-03T00:00:00Z",
+      "policy_action": "block",
+      "threat_classification": "malicious",
+      "source": "https://research.codelake.dev/advisories/clr-2026-3045-edrtester/",
+      "summary": "Codelake Research reported this exact Marketplace artifact as a malicious EDR tester that performs host and Active Directory reconnaissance, beaconing, and dormant reverse-shell capability. Codelake publishes an OSV-compatible record, but remains the source of record for this extension advisory."
     }
   ]
 }

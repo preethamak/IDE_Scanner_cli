@@ -36,6 +36,44 @@ PROVIDER_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024
 PROVIDER_OUTPUT_CHUNK_BYTES = 64 * 1024
 PROVIDER_OUTPUT_LIMIT_MARKER = "GUARDRAILS_PROVIDER_OUTPUT_LIMIT"
 
+# Provider implementations parse attacker-controlled extension content. They
+# must not receive marketplace/CI credentials or arbitrary process settings.
+# Keep only variables needed to locate the runtime and preserve text/temp-file
+# behavior. The small set of provider settings created in a disposable
+# directory by ``semgrep_runtime_environment`` is safe to pass through; broad
+# SEMGREP_* inheritance is deliberately avoided because Semgrep also supports
+# credential-bearing environment variables.
+_SAFE_CHILD_ENV_KEYS = frozenset({
+    "PATH",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "VIRTUAL_ENV",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "SYSTEMROOT",
+    "WINDIR",
+    "PATHEXT",
+})
+_SAFE_SEMGREP_ENV_KEYS = frozenset({
+    "SEMGREP_SETTINGS_FILE",
+    "SEMGREP_LOG_FILE",
+    "SEMGREP_SEND_METRICS",
+})
+
+
+def safe_child_environment(environment: dict[str, str] | None = None) -> dict[str, str]:
+    """Return the minimal environment allowed for an untrusted-content parser."""
+    source = os.environ if environment is None else environment
+    return {
+        key: value
+        for key, value in source.items()
+        if key in _SAFE_CHILD_ENV_KEYS or key in _SAFE_SEMGREP_ENV_KEYS
+    }
+
 
 def semgrep_timeout_seconds() -> int:
     try:
@@ -61,7 +99,7 @@ def run_bounded_process(
     file_size_limit_mb: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a provider without allowing timed-out descendants to survive."""
-    process_env = dict(env) if env is not None else os.environ.copy()
+    process_env = safe_child_environment(env)
     # Source checkouts invoke the bounded workers before the package is
     # installed. Preserve that supported execution mode by making the local
     # package importable to the child, while retaining caller-provided values.
@@ -237,7 +275,7 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
 @contextmanager
 def semgrep_runtime_environment() -> Iterator[dict[str, str]]:
     runtime_dir = Path(tempfile.mkdtemp(prefix="guardrails-semgrep-"))
-    environment = os.environ.copy()
+    environment = safe_child_environment()
     environment["SEMGREP_SETTINGS_FILE"] = str(runtime_dir / "settings.yml")
     environment["SEMGREP_LOG_FILE"] = str(runtime_dir / "semgrep.log")
     environment["SEMGREP_SEND_METRICS"] = "off"

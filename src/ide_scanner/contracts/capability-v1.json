@@ -45,7 +45,12 @@
       "keywords": [
         "language server",
         "language support",
-        "intellisense"
+        "intellisense",
+        "syntax highlighting",
+        "static type checking",
+        "type checking",
+        "language development",
+        "programming language"
       ],
       "signals": [
         "native_code"
@@ -73,14 +78,34 @@
       ],
       "expected": [
         "activation",
+        "credential_input",
         "filesystem",
         "ide_contributions",
         "network",
         "process_execution"
       ],
-      "forbidden": [
+      "forbidden": []
+    },
+    "cloud_developer_tool": {
+      "keywords": [
+        "cloud",
+        "azure",
+        "aws",
+        "gcp",
+        "runbook",
+        "devops",
+        "infrastructure as code"
+      ],
+      "signals": [],
+      "expected": [
+        "activation",
+        "filesystem",
+        "ide_contributions",
+        "network",
+        "process_execution",
         "credential_input"
-      ]
+      ],
+      "forbidden": []
     },
     "security_tool": {
       "keywords": [

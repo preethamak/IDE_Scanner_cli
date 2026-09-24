@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from guardrails_cli.presentation import severity_detail
+from guardrails_cli.presentation import finding_actionability, severity_detail, split_findings
 
 from ._atomic import write_text
 
@@ -80,24 +80,39 @@ def _extension_markdown(extension: dict[str, Any]) -> list[str]:
         "",
         "### Findings",
         "",
-        "| Severity | Rule | Evidence | Summary |",
-        "| --- | --- | --- | --- |",
+        "| Actionability | Severity | Rule | Evidence | Summary |",
+        "| --- | --- | --- | --- | --- |",
     ]
     findings = [item for item in extension.get("findings", []) if isinstance(item, dict)]
-    if not findings:
-        lines.append("| - | - | - | No findings reported |")
-    for finding in findings:
-        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
-        lines.append(
-            "| {severity} | `{rule}` | {klass} | {summary} |".format(
-                severity=_clean(severity_detail(finding)),
-                rule=_clean(finding.get("rule_id", "")),
-                klass=_clean(finding.get("evidence_class") or evidence.get("evidence_class") or "unknown"),
-                summary=_clean(finding.get("evidence_summary", "")),
-            )
-        )
+    actionable, contextual = split_findings(findings)
+    if actionable:
+        lines.extend(_finding_row(finding) for finding in actionable)
+    else:
+        lines.append("| - | - | - | - | No action-level findings reported |")
+    if contextual:
+        lines.extend([
+            "",
+            "### Contextual observations",
+            "",
+            "These observations describe extension capabilities or packaging context; they did not change the decision.",
+            "",
+            "| Actionability | Severity | Rule | Evidence | Summary |",
+            "| --- | --- | --- | --- | --- |",
+        ])
+        lines.extend(_finding_row(finding) for finding in contextual)
     lines.append("")
     return lines
+
+
+def _finding_row(finding: dict[str, Any]) -> str:
+    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+    return "| {actionability} | {severity} | `{rule}` | {klass} | {summary} |".format(
+        actionability=_clean(finding_actionability(finding)),
+        severity=_clean(severity_detail(finding)),
+        rule=_clean(finding.get("rule_id", "")),
+        klass=_clean(finding.get("evidence_class") or evidence.get("evidence_class") or "unknown"),
+        summary=_clean(finding.get("evidence_summary", "")),
+    )
 
 
 def _counts(summary: dict[str, Any], extensions: list[dict[str, Any]]) -> dict[str, int]:

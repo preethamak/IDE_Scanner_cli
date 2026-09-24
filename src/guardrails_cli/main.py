@@ -111,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--select", help="Select displayed rows, for example 1,3-5 or all.")
     scan.add_argument("--version", help="Exact Marketplace version; may also be supplied as ID@VERSION.")
     scan.add_argument("--target-platform", help="Exact Marketplace artifact variant, for example darwin-x64.")
-    scan.add_argument("--runtime", action="store_true", help="Run a capability-gated dynamic pass for local, installed, uploaded, or Marketplace artifacts inside Bubblewrap; non-executable packages are recorded as not applicable.")
+    scan.add_argument("--runtime", action="store_true", help="Run a capability-gated Bubblewrap runtime for every resolvable activation entrypoint and sensitive capability surface; purely declarative packages are recorded as not applicable.")
     scan.add_argument("--runtime-timeout", type=int, default=20, help="Maximum seconds per controlled runtime action (1-300).")
     scan.add_argument(
         "--profile",
@@ -120,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Analysis boundary. Deep matches the website Deep Scan when its required providers are available.",
     )
     scan.add_argument("--online", action="store_true", help="Enable registry and dependency checks for local/file scans.")
+    scan.add_argument("--extension-advisories", metavar="ADVISORIES.json", help="Replay a versioned exact-extension advisory snapshot (useful for deterministic CI and website/CLI parity).")
     scan.add_argument("--registry-snapshot", metavar="REPORT.json", help="Replay registry and dependency intelligence captured in an earlier JSON report.")
     scan.add_argument("--format", choices=EXPORT_FORMATS, default="terminal", help="Output or saved-report format.")
     scan.add_argument("--output", "--out", dest="output", help="Write the selected report format to this path.")
@@ -132,6 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     brief.add_argument("--purpose", required=True, help="The user need being evaluated, for example 'read and edit plist files'.")
     brief.add_argument("--target-platform", help="Exact Marketplace artifact variant, for example darwin-x64.")
     brief.add_argument("--profile", choices=("standard", "deep"), default="standard", help="Analysis boundary for every candidate.")
+    brief.add_argument("--extension-advisories", metavar="ADVISORIES.json", help="Replay a versioned exact-extension advisory snapshot for every candidate.")
     brief.add_argument("--registry-snapshot", metavar="REPORT.json", help="Replay registry and dependency intelligence captured in an earlier JSON report.")
     brief.add_argument("--format", choices=("terminal", "json", "md"), default="terminal", help="Risk brief output format.")
     brief.add_argument("--output", "--out", dest="output", help="Write JSON or Markdown to this path.")
@@ -306,6 +308,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 extension_id,
                 version=version,
                 target_platform=args.target_platform,
+                extension_advisories=args.extension_advisories,
                 registry_snapshot=args.registry_snapshot,
                 required_providers=required_providers,
                 dynamic_runtime=args.runtime or args.profile == "deep",
@@ -320,7 +323,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         print(section("Local file target"))
         print(table(["Type", "Path"], [[item.get("type"), item.get("path")] for item in targets], max_widths=[12, 88]))
         if args.runtime or args.profile == "deep":
-            print(color("Scanning the selected local artifact with static analysis and capability-gated Bubblewrap runtime; host execution is never used…", "brand_cyan"))
+            print(color("Scanning the selected local artifact with static analysis and capability-gated Bubblewrap runtime for executable entrypoints; host execution is never used…", "brand_cyan"))
         else:
             print(color("Scanning the selected local artifact without executing extension code…", "brand_cyan"))
         report = run_with_profile(
@@ -328,6 +331,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             lambda required_providers: scan_paths(
                 [item["path"] for item in targets],
                 online=args.online or args.profile == "deep",
+                extension_advisories=args.extension_advisories,
                 registry_snapshot=args.registry_snapshot,
                 required_providers=required_providers,
                 dynamic_runtime=args.runtime or args.profile == "deep",
@@ -344,6 +348,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             selected_rows,
             profile=args.profile,
             online=args.online,
+            extension_advisories=args.extension_advisories,
             dynamic_runtime=args.runtime or args.profile == "deep",
             runtime_timeout_seconds=args.runtime_timeout,
             progress=lambda message: print(color(message, "brand_cyan")),
@@ -393,8 +398,10 @@ def cmd_brief(args: argparse.Namespace) -> int:
                 extension_id,
                 version=version,
                 target_platform=args.target_platform,
+                extension_advisories=args.extension_advisories,
                 registry_snapshot=args.registry_snapshot,
                 required_providers=required_providers,
+                dynamic_runtime=args.profile == "deep",
             ),
         ))
     brief = build_risk_brief(reports, purpose=purpose, profile=args.profile)
@@ -802,6 +809,7 @@ def _scan_namespace(**overrides: Any) -> argparse.Namespace:
         "file": None, "marketplace": None, "marketplace_search": None,
         "all": False, "ide": None, "search": "", "extension": [], "select": None,
         "version": None, "target_platform": None, "profile": "standard", "online": False,
+        "extension_advisories": None, "registry_snapshot": None,
         "runtime": False, "runtime_timeout": 20,
         "format": "terminal", "output": None, "show_all": False, "yes": False, "fail_on": "block",
     }

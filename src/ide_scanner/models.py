@@ -141,6 +141,9 @@ class ExtensionSummary:
     verdict_label: str
     top_findings: list[str]
     finding_count: int
+    actionable_finding_count: int
+    low_finding_count: int
+    contextual_finding_count: int
     dependency_count: int
     activation_summary: str
     detail_ref: str

@@ -33,7 +33,7 @@ dev = ["build>=1.2", "twine>=6"]
 guardrails = "guardrails_cli.main:main"
 
 [project.urls]
-Website = "https://ide-scanner.vercel.app"
+Website = "https://abscissa.dev"
 
 [tool.setuptools.packages.find]
 where = ["src"]

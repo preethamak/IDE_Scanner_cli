@@ -81,18 +81,54 @@ class JobStore:
     def write(self, job: dict[str, Any]) -> None:
         job["updated_at"] = _now()
         path = self.jobs_dir / f"{job['id']}.json"
-        temp = path.with_suffix(".tmp")
         with self._lock:
-            temp.write_text(json.dumps(job, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            temp.replace(path)
+            self._write_json_locked(path, job)
 
     def write_report(self, job_id: str, report: dict[str, Any]) -> str:
         path = self.reports_dir / f"{job_id}.json"
-        temp = path.with_suffix(".tmp")
         with self._lock:
-            temp.write_text(json.dumps(report, separators=(",", ":"), sort_keys=True), encoding="utf-8")
-            temp.replace(path)
+            self._write_json_locked(path, report, separators=(",", ":"))
         return f"/v1/reports/{job_id}"
+
+    def try_complete(self, job_id: str, summary: dict[str, Any], report: dict[str, Any]) -> bool:
+        """Commit a report only if this job is still owned by its runner.
+
+        Timeout handling deliberately cannot kill a Python thread. A late
+        runner must therefore lose the terminal-state race instead of turning
+        a previously failed job back into a successful one.
+        """
+        job_path = self.jobs_dir / f"{job_id}.json"
+        report_path = self.reports_dir / f"{job_id}.json"
+        with self._lock:
+            current = self._read_json_locked(job_path)
+            if not isinstance(current, dict) or current.get("status") != "running":
+                return False
+            self._write_json_locked(report_path, report, separators=(",", ":"))
+            current.update({
+                "status": "complete",
+                "stage": "complete",
+                "summary": summary,
+                "report_ref": f"/v1/reports/{job_id}",
+                "updated_at": _now(),
+            })
+            self._write_json_locked(job_path, current)
+            return True
+
+    def try_fail(self, job_id: str, error: str, *, stage: str = "failed") -> bool:
+        """Fail a non-terminal job without overwriting a prior terminal state."""
+        path = self.jobs_dir / f"{job_id}.json"
+        with self._lock:
+            current = self._read_json_locked(path)
+            if not isinstance(current, dict) or current.get("status") not in {"queued", "running"}:
+                return False
+            current.update({
+                "status": "failed",
+                "stage": stage,
+                "error": error,
+                "updated_at": _now(),
+            })
+            self._write_json_locked(path, current)
+            return True
 
     def get_report(self, job_id: str) -> dict[str, Any] | None:
         if not re.fullmatch(r"job_[a-f0-9]{32}", job_id):
@@ -105,6 +141,22 @@ class JobStore:
         except (OSError, json.JSONDecodeError):
             return None
         return value if isinstance(value, dict) else None
+
+    @staticmethod
+    def _read_json_locked(path: Path) -> Any:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    @staticmethod
+    def _write_json_locked(path: Path, value: Any, *, separators: tuple[str, str] | None = None) -> None:
+        temp = path.with_suffix(".tmp")
+        kwargs: dict[str, Any] = {"sort_keys": True}
+        if separators is not None:
+            kwargs["separators"] = separators
+        temp.write_text(json.dumps(value, indent=None if separators else 2, **kwargs) + ("" if separators else "\n"), encoding="utf-8")
+        temp.replace(path)
 
 
 def execute_marketplace_job(
@@ -132,16 +184,9 @@ def execute_marketplace_job(
         extension_rows = bundle.get("leaderboard", {}).get("extensions", [])
         if not extension_rows:
             raise RuntimeError("Scanner completed without an extension result.")
-        job["status"] = "complete"
-        job["stage"] = "complete"
-        job["summary"] = bundle["summary"]
-        job["report_ref"] = store.write_report(job["id"], bundle)
-        store.write(job)
+        store.try_complete(job["id"], bundle["summary"], bundle)
     except Exception as exc:  # noqa: BLE001 - job records must surface scanner/network failures
-        job["status"] = "failed"
-        job["stage"] = "failed"
-        job["error"] = str(exc)
-        store.write(job)
+        store.try_fail(job["id"], str(exc))
 
 
 class ScanWorkerPool:
@@ -203,10 +248,11 @@ class ScanWorkerPool:
             # The scan overran its budget. Record the timeout; the orphaned
             # daemon thread cannot be force-killed in CPython, but the bounded
             # pool prevents it from starving new work indefinitely.
-            job["status"] = "failed"
-            job["stage"] = "timeout"
-            job["error"] = f"Scan exceeded the {self.job_timeout}s job timeout and was abandoned."
-            self.store.write(job)
+            self.store.try_fail(
+                job["id"],
+                f"Scan exceeded the {self.job_timeout}s job timeout and was abandoned.",
+                stage="timeout",
+            )
 
 
 def cleanup_stale_jobs(store: JobStore, max_age_seconds: int = 7 * 24 * 3600) -> int:

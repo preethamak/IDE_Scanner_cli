@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -43,6 +45,19 @@ TARGET_PLATFORM_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 class MarketplaceDownloadError(RuntimeError):
     """Raised when a marketplace VSIX cannot be resolved or downloaded safely."""
+
+
+class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow only HTTPS redirects to hosts that resolve publicly.
+
+    Marketplace metadata and CDN redirects are external input. A redirecting
+    downloader must not become an SSRF primitive for a scanner worker, even
+    when the initial URL looked like a normal registry asset.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        _require_public_download_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 IMPERSONATION_TARGETS = (
@@ -470,27 +485,40 @@ def _degzip_if_needed(path: Path, max_bytes: int = MAX_GUNZIP_BYTES) -> None:
 
 
 def _download_to_file(url: str, handle: Any, max_bytes: int, timeout: int) -> None:
+    _require_public_download_url(url)
     request = urllib.request.Request(url, headers={"accept": "application/octet-stream"})
+    opener = urllib.request.build_opener(_PublicRedirectHandler())
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
             _stream_with_cap(response, handle, max_bytes, url)
         return
-    except (OSError, urllib.error.URLError):
-        pass
+    except (OSError, urllib.error.URLError) as exc:
+        raise MarketplaceDownloadError(f"Marketplace artifact download failed for {url}: {exc}") from exc
 
-    # Fall back to curl, still enforcing the byte cap on our side while streaming.
-    process = subprocess.Popen(
-        ["curl", "-L", "--max-time", str(timeout), "-s", url],
-        stdout=subprocess.PIPE,
-    )
+
+def _require_public_download_url(url: str) -> None:
     try:
-        assert process.stdout is not None
-        _stream_with_cap(process.stdout, handle, max_bytes, url)
-    finally:
-        process.stdout.close() if process.stdout else None
-        process.wait(timeout=timeout)
-    if process.returncode != 0:
-        raise MarketplaceDownloadError(f"curl exited with status {process.returncode} downloading {url}")
+        parsed = urlparse(str(url))
+        port = parsed.port
+    except ValueError as exc:
+        raise MarketplaceDownloadError("Marketplace artifact URL has an invalid port") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or port not in (None, 443)
+    ):
+        raise MarketplaceDownloadError("Marketplace artifact URL must be public HTTPS on port 443 without credentials")
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)}
+    except socket.gaierror as exc:
+        raise MarketplaceDownloadError(f"Marketplace artifact host could not be resolved: {exc}") from exc
+    if not addresses:
+        raise MarketplaceDownloadError("Marketplace artifact host did not resolve")
+    for address in addresses:
+        if not ipaddress.ip_address(address).is_global:
+            raise MarketplaceDownloadError(f"Marketplace artifact host resolves to a non-public address: {address}")
 
 
 def _stream_with_cap(source: Any, handle: Any, max_bytes: int, url: str) -> None:

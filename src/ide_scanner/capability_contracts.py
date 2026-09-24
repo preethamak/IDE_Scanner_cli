@@ -22,17 +22,29 @@ def classify_extension(extension: Any) -> dict[str, Any]:
         str(item.get("id")) for item in extension.capabilities
         if isinstance(item, dict) and item.get("id")
     }
-    ranked: list[tuple[int, str, list[str]]] = []
+    ranked: list[tuple[float, int, str, list[str]]] = []
     for class_id, contract in payload["classes"].items():
         signals: list[str] = []
+        text_signal_count = 0
         for keyword in contract.get("keywords", []):
             if str(keyword).lower() in text:
                 signals.append(f"text:{keyword}")
+                text_signal_count += 1
         for capability in contract.get("signals", []):
             if capability in capabilities:
                 signals.append(f"capability:{capability}")
-        ranked.append((len(signals), str(class_id), signals))
-    score, class_id, signals = max(ranked, default=(0, "unknown", []))
+        # Declarative icon/theme contributions are weak context: many real
+        # language tools and cloud/developer extensions ship an icon theme
+        # alongside their executable product. A textual functional contract
+        # must outrank that incidental contribution, or native language tools
+        # get misclassified as themes and produce avoidable contract reviews.
+        weak_capability_count = sum(
+            1 for signal in contract.get("signals", [])
+            if signal == "theme_surface" and signal in capabilities
+        )
+        score = float(text_signal_count) + (0.25 * weak_capability_count)
+        ranked.append((score, text_signal_count, str(class_id), signals))
+    score, _text_signal_count, class_id, signals = max(ranked, default=(0.0, 0, "unknown", []))
     if score == 0:
         class_id, signals = "unknown", []
     return {

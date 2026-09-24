@@ -17,6 +17,7 @@ from typing import Any
 
 from .artifact_store import ArtifactStore, ArtifactStoreError, StoredArtifact, artifact_store_from_environment
 from .artifact_input import ArtifactInputError, acquire_https_vsix
+from .build_identity import scanner_build
 
 from .ast_analyzer import (
     JS_AST_EXTS,
@@ -57,7 +58,7 @@ from .public_outcomes import apply_public_assessment
 from .rule_registry import RULESET_VERSION
 from .posture import scan_posture, summarize_posture
 from .providers import run_static_providers
-from .providers.runtime import SEMGREP_MAX_TARGET_BYTES, run_bounded_process
+from .providers.runtime import SEMGREP_MAX_TARGET_BYTES, run_bounded_process, safe_child_environment
 from .sandbox_runner import external_trace_available, run_sandbox
 from .registry import (
     MarketplaceDownloadError,
@@ -111,6 +112,14 @@ DEEP_REQUIRED_PROVIDERS = frozenset({"semgrep", "yara", "dependency_intelligence
 ARTIFACT_ORIGINS = frozenset({"user_uploaded_vsix", "installed_directory", "local_directory", "archive_artifact", "source_snapshot"})
 SKIP_DIRS = {".git", ".hg", ".svn"}
 MAX_TEXT_BYTES = 64 * 1024 * 1024
+# A local extension can contain generated language-server/runtime payloads that
+# are valid artifacts but are not a safe unit for an all-local inventory scan.
+# Enforce a hard budget before hashing, Semgrep, or AST work. Exceeding it is
+# an explicit incomplete result (never an allow/clean result), so publication
+# gates can quarantine the artifact instead of risking a false negative or a
+# worker that never finishes.
+MAX_EXTENSION_FILES = 50_000
+MAX_EXTENSION_BYTES = 512 * 1024 * 1024
 MAX_SOURCE_PREVIEW_BYTES = 200 * 1024
 MAX_SOURCE_PREVIEWS = 40
 # Multi-megabyte entrypoints are treated as generated for correlation and AST
@@ -148,6 +157,7 @@ CORRELATED_RULES = {
     "credential-exfiltration-chain",
     "credential-harvesting-exfiltration",
     "credential-identifier-flow-to-network",
+    "environment-data-exfiltration",
     "destructive-transfer-chain",
     "download-and-execute",
     "install-download-execute",
@@ -170,6 +180,7 @@ BLOCKING_CORRELATED_RULES = CORRELATED_RULES - {
     "download-and-execute",
     "remote-vsix-install-chain",
     "destructive-transfer-chain",
+    "environment-data-exfiltration",
     "persistence-chain",
 }
 BLOCKING_OBSERVED_RULES = {
@@ -343,6 +354,15 @@ def _scan_request(
     jobs: int = 1,
     marketplace_artifact_store: ArtifactStore | None = None,
 ) -> dict[str, Any]:
+    # Validate replayed intelligence before acquiring or scanning any artifact.
+    # A malformed/tampered snapshot is a request-level failure; delaying this
+    # check until after static analysis wastes work and can leave callers with
+    # the misleading impression that a partial scan was useful.
+    replayed_registry = (
+        _load_registry_snapshot(request.registry_snapshot_file)
+        if request.registry_snapshot_file is not None
+        else None
+    )
     targets: list[dict[str, str]] = []
     root = Path.cwd()
 
@@ -415,10 +435,9 @@ def _scan_request(
         sandbox_bundle = _merge_dynamic_runtime_bundle(sandbox_bundle, runtime_bundle)
     _apply_sandbox_observations(extensions, sandbox_bundle["extensions"])
     _apply_sandbox_provider(extensions, sandbox_bundle)
-    registry = (
-        _load_registry_snapshot(request.registry_snapshot_file)
-        if request.registry_snapshot_file is not None
-        else _capture_registry_snapshot(enrich_registry(extensions, online=request.online), source="live")
+    registry = replayed_registry or _capture_registry_snapshot(
+        enrich_registry(extensions, online=request.online),
+        source="live",
     )
     _apply_registry_findings(extensions, registry["findings"])
     dependency_errors = [
@@ -590,6 +609,7 @@ def _load_registry_snapshot(path: Path | str) -> dict[str, Any]:
 
 
 def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[str, dict[str, Any]] | None = None) -> ExtensionReport:
+    _enforce_extension_resource_budget(path)
     manifest, manifest_status = _read_manifest_status(path / "package.json")
     name = str(manifest.get("name") or path.name)
     publisher = str(manifest.get("publisher") or "unknown")
@@ -607,9 +627,9 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
     _add_dependency_source_findings(extension_id, version, manifest, findings)
 
     files = _walk_extension_files(path)
-    entrypoints = _declared_entrypoints(manifest, path)
+    entrypoints, optional_missing_entrypoints = _declared_entrypoints(manifest, path)
     artifact_inventory = _artifact_inventory(path, files)
-    analysis_coverage = _new_analysis_coverage(files, entrypoints, path)
+    analysis_coverage = _new_analysis_coverage(files, entrypoints, path, optional_missing_entrypoints)
     _add_artifact_inventory_findings(extension_id, version, artifact_inventory, known_bad_hashes or {}, findings, capabilities, path)
     _add_repository_posture_findings(extension_id, version, manifest, path, findings, artifact_inventory)
 
@@ -719,7 +739,15 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
             analysis_coverage["analyzed_executable_files"].append(rel)
             if suffix in JS_AST_EXTS:
                 module_summaries.append(module_summary(rel, text, analyze_imports=not generated_blob))
-            _add_code_findings(extension_id, version, rel, text, findings, capabilities)
+            _add_code_findings(
+                extension_id,
+                version,
+                rel,
+                text,
+                findings,
+                capabilities,
+                is_entrypoint=is_entrypoint,
+            )
             _add_workspace_cli_path_findings(extension_id, version, manifest, [(rel, text)], findings)
         if suffix in EXEC_TEXT_EXTS or suffix in {".html", ".htm"}:
             _add_webview_csp_findings(
@@ -1071,16 +1099,27 @@ _DYNAMIC_RUNTIME_CAPABILITIES = frozenset({
     "wasm_runtime",
 })
 
+# An activation process that exits unsuccessfully did not complete the
+# required runtime contract, even if it emitted some authenticated events
+# first. Keep the event as evidence, but do not let the receipt become
+# publication-complete. Lifecycle-script failures are intentionally excluded:
+# they are a separate contextual observation and the activation probe still
+# runs afterward.
+_RUNTIME_COVERAGE_FAILURE_KINDS = frozenset({
+    "runtime_timeout",
+    "sandbox_error",
+    "runtime_entrypoint_error",
+})
+
 
 def _runtime_required_for_report(report: ExtensionReport) -> bool:
     """Require dynamic coverage only when it can answer a security question.
 
-    A VS Code extension can have a JavaScript activation entrypoint without
-    requesting sensitive powers. Running every such entrypoint in the sandbox
-    creates noise and incorrectly treats ordinary themes, UI helpers, and
-    similarly low-power packages as runtime-required. Static analysis still
-    covers their executable files; the dynamic provider records them as
-    ``not-applicable`` under the capability policy.
+    A resolvable activation entrypoint is itself an executable trust boundary.
+    Running it in the sandbox gives the scanner a chance to observe behavior
+    that static rules did not recognize, so a missing capability label cannot
+    silently turn into a false negative. Purely declarative packages such as
+    themes remain ``not-applicable`` when they ship no executable entrypoint.
 
     Sensitive capabilities remain runtime-required even when no activation
     entrypoint is declared, which covers native/WASM payloads and lifecycle
@@ -1095,16 +1134,34 @@ def _runtime_required_for_report(report: ExtensionReport) -> bool:
     }
     if capability_ids & _DYNAMIC_RUNTIME_CAPABILITIES:
         return True
-    # A theme normally has no executable entrypoint. If it does, run it in the
-    # controlled namespace even when static inspection did not recognize a
-    # network/process capability. This is the boundary that catches hidden or
-    # obfuscated behavior without forcing declarative themes through a fake
-    # runtime path.
-    classification = classify_extension(report)
-    if classification.get("primary") == "theme":
-        coverage = report.analysis_coverage if isinstance(report.analysis_coverage, dict) else {}
-        return bool(coverage.get("resolved_entrypoints"))
-    return False
+    coverage = report.analysis_coverage if isinstance(report.analysis_coverage, dict) else {}
+    return bool(coverage.get("resolved_entrypoints"))
+
+
+def _runtime_instance_key(report: ExtensionReport) -> str:
+    """Return the collision-resistant key used for per-installation runtime evidence."""
+    return str(report.instance_id or f"{report.extension_id}@{report.version}")
+
+
+def _runtime_observations_for_report(
+    observations: dict[str, list[dict[str, Any]]],
+    report: ExtensionReport,
+) -> list[dict[str, Any]]:
+    """Read instance-keyed evidence with a legacy extension-ID fallback."""
+    instance_key = _runtime_instance_key(report)
+    if instance_key in observations:
+        value = observations[instance_key]
+        return value if isinstance(value, list) else []
+    value = observations.get(report.extension_id, [])
+    return value if isinstance(value, list) else []
+
+
+def _runtime_bundle_key(bundle: dict[str, Any], report: ExtensionReport) -> str:
+    """Preserve the legacy ID key until a duplicate installation needs disambiguation."""
+    extensions = bundle.get("extensions") if isinstance(bundle.get("extensions"), dict) else {}
+    if report.extension_id not in extensions:
+        return report.extension_id
+    return _runtime_instance_key(report)
 
 
 def _finalize_runtime_trace_metadata(runtime_bundle: dict[str, Any]) -> None:
@@ -1130,6 +1187,18 @@ def _runtime_execution_failure(runtime: dict[str, Any], items: list[dict[str, An
     execution path; otherwise the required provider is incomplete.
     """
     plan = runtime.get("plan") if isinstance(runtime.get("plan"), dict) else {}
+    dependencies = plan.get("runtime_dependencies") if isinstance(plan.get("runtime_dependencies"), list) else []
+    failed_dependencies = [
+        item for item in dependencies
+        if isinstance(item, dict)
+        and item.get("required") is True
+        and str(item.get("status") or "") not in {"packaged", "provisioned"}
+    ]
+    if failed_dependencies:
+        dependency = failed_dependencies[0]
+        name = str(dependency.get("dependency") or "required runtime sidecar")
+        status = str(dependency.get("status") or "unknown")
+        return f"Required runtime sidecar {name} was not verified ({status})."
     instrumentation = plan.get("instrumentation") if isinstance(plan.get("instrumentation"), dict) else {}
     entrypoint_status = str(instrumentation.get("entrypoint_status") or "")
     if entrypoint_status != "not-applicable":
@@ -1162,7 +1231,10 @@ def _apply_local_dynamic_runtime(
     """
     for target, report in zip(targets, extensions, strict=False):
         required = _runtime_required_for_report(report)
+        instance_key = _runtime_instance_key(report)
+        bundle_key = _runtime_bundle_key(runtime_bundle, report)
         run_record: dict[str, Any] = {
+            "instance_id": instance_key,
             "extension_id": report.extension_id,
             "version": report.version,
             "required": required,
@@ -1172,6 +1244,7 @@ def _apply_local_dynamic_runtime(
         }
         if required:
             runtime_bundle.setdefault("required_extension_ids", []).append(report.extension_id)
+            runtime_bundle.setdefault("runtime_required_instances", []).append(instance_key)
             try:
                 runtime = run_sandbox(
                     Path(target["path"]),
@@ -1179,12 +1252,10 @@ def _apply_local_dynamic_runtime(
                     timeout_seconds=timeout_seconds,
                 )
                 observed = runtime.get("extensions", {}) if isinstance(runtime, dict) else {}
-                items = observed.get(report.extension_id, []) if isinstance(observed, dict) else []
-                if not isinstance(items, list):
-                    items = []
+                items = _runtime_observations_for_report(observed, report) if isinstance(observed, dict) else []
                 runtime_failed = any(
                     isinstance(item, dict)
-                    and str(item.get("kind") or "") in {"runtime_timeout", "sandbox_error"}
+                    and str(item.get("kind") or "") in _RUNTIME_COVERAGE_FAILURE_KINDS
                     for item in items
                 )
                 execution_error = _runtime_execution_failure(runtime, items) if required else ""
@@ -1195,7 +1266,7 @@ def _apply_local_dynamic_runtime(
                         "evidence": execution_error,
                     })
                     runtime_failed = True
-                runtime_bundle.setdefault("extensions", {})[report.extension_id] = [
+                runtime_bundle.setdefault("extensions", {})[bundle_key] = [
                     item for item in items if isinstance(item, dict)
                 ]
                 run_record.update({
@@ -1218,7 +1289,7 @@ def _apply_local_dynamic_runtime(
                 if runtime_failed:
                     run_record["error"] = execution_error or "Runtime execution did not complete successfully."
             except Exception as exc:  # noqa: BLE001 - runtime failure is disclosed and fail-closed
-                runtime_bundle.setdefault("extensions", {})[report.extension_id] = [{
+                runtime_bundle.setdefault("extensions", {})[bundle_key] = [{
                     "kind": "sandbox_error",
                     "phase": "runtime",
                     "evidence": str(exc)[:500],
@@ -1278,7 +1349,10 @@ def scan_marketplace_extension(
         report = scan_vsix(scan_path, known_bad_hashes=known_bad_hashes, artifact_origin="archive_artifact")
         if dynamic_runtime and runtime_bundle is not None:
             runtime_required = _runtime_required_for_report(report)
+            instance_key = _runtime_instance_key(report)
+            bundle_key = _runtime_bundle_key(runtime_bundle, report)
             run_record: dict[str, Any] = {
+                "instance_id": instance_key,
                 "extension_id": report.extension_id,
                 "version": report.version,
                 "required": runtime_required,
@@ -1288,6 +1362,7 @@ def scan_marketplace_extension(
             }
             if runtime_required:
                 runtime_bundle.setdefault("required_extension_ids", []).append(report.extension_id)
+                runtime_bundle.setdefault("runtime_required_instances", []).append(instance_key)
                 try:
                     runtime = run_sandbox(
                         scan_path,
@@ -1295,12 +1370,10 @@ def scan_marketplace_extension(
                         timeout_seconds=runtime_timeout_seconds,
                     )
                     observed = runtime.get("extensions", {}) if isinstance(runtime, dict) else {}
-                    items = observed.get(report.extension_id, []) if isinstance(observed, dict) else []
-                    if not isinstance(items, list):
-                        items = []
+                    items = _runtime_observations_for_report(observed, report) if isinstance(observed, dict) else []
                     runtime_failed = any(
                         isinstance(item, dict)
-                        and str(item.get("kind") or "") in {"runtime_timeout", "sandbox_error"}
+                        and str(item.get("kind") or "") in _RUNTIME_COVERAGE_FAILURE_KINDS
                         for item in items
                     )
                     execution_error = _runtime_execution_failure(runtime, items) if runtime_required else ""
@@ -1311,7 +1384,7 @@ def scan_marketplace_extension(
                             "evidence": execution_error,
                         })
                         runtime_failed = True
-                    runtime_bundle.setdefault("extensions", {})[report.extension_id] = [
+                    runtime_bundle.setdefault("extensions", {})[bundle_key] = [
                         item for item in items if isinstance(item, dict)
                     ]
                     run_record.update({
@@ -1334,7 +1407,7 @@ def scan_marketplace_extension(
                     if runtime_failed:
                         run_record["error"] = execution_error or "Runtime execution did not complete successfully."
                 except Exception as exc:  # noqa: BLE001 - runtime failures become disclosed provider evidence
-                    runtime_bundle.setdefault("extensions", {})[report.extension_id] = [{
+                    runtime_bundle.setdefault("extensions", {})[bundle_key] = [{
                         "kind": "sandbox_error",
                         "phase": "runtime",
                         "evidence": str(exc)[:500],
@@ -2195,6 +2268,8 @@ def _add_code_findings(
     text: str,
     findings: list[Finding],
     capabilities: dict[str, dict[str, Any]],
+    *,
+    is_entrypoint: bool = False,
 ) -> None:
     aliased_process_re, aliased_process_methods = _aliased_process_execution(text)
     process_exec_re = re.compile(
@@ -2212,7 +2287,9 @@ def _add_code_findings(
     has_download = bool(DOWNLOAD_RE.search(text))
     has_content_download = _has_content_download(text)
     has_obfuscation = bool(re.search(r"(atob\(|buffer\.from\([^)]*,\s*['\"]base64['\"]|fromcharcode|\\x[0-9a-f]{2})", text, re.I))
-    has_dynamic_exec = bool(_DYNAMIC_EVAL_RE.search(text))
+    has_dynamic_exec = bool(_DYNAMIC_EVAL_RE.search(text)) or bool(
+        aliased_process_re and aliased_process_re.search(text)
+    )
     has_exec_file = bool(re.search(r"\b(?:execFile|execFileSync)\s*\(", text)) or bool(
         aliased_process_methods & {"execFile", "execFileSync"}
     )
@@ -2261,6 +2338,21 @@ def _add_code_findings(
             [rel],
             "Block the extension and inspect the exact credential source and outbound destination.",
             {"evidence_class": "correlated", **identifier_credential_flow},
+        ))
+
+    environment_data_flow = _has_environment_data_network_flow(text)
+    if environment_data_flow:
+        findings.append(_finding(
+            extension_id,
+            version,
+            "environment-data-exfiltration",
+            "credential-access",
+            "HIGH",
+            0.93,
+            "Whole-process environment data is collected or serialized and reaches an outbound request.",
+            [rel],
+            "Review the exact environment fields, destination, user disclosure, and whether the transfer is necessary. Sending the complete process environment is not ordinary telemetry.",
+            {"evidence_class": "correlated", **environment_data_flow},
         ))
 
     # Credential stealers commonly split collection and transmission across
@@ -2383,6 +2475,7 @@ def _add_code_findings(
                 {
                     "evidence_class": "posture",
                     "analysis": "bounded-static-bundle-profile",
+                    "scope": "entrypoint" if is_entrypoint else "secondary-generated",
                     "obfuscation_indicators": bundle_profile["obfuscation_indicators"],
                     "metrics": bundle_profile["metrics"],
                 },
@@ -2840,11 +2933,26 @@ _CHILD_PROCESS_DESTRUCTURE_RE = re.compile(
     r"|import\s*\{(?P<imports>[^}]{1,500})\}\s*from\s*['\"](?:node:)?child_process['\"]",
     re.I,
 )
+_CHILD_PROCESS_NAMESPACE_RE = re.compile(
+    r"(?:const|let|var)\s+(?P<alias>[A-Za-z_$][\w$]*)\s*=\s*"
+    r"require\s*\(\s*['\"](?:node:)?child_process['\"]\s*\)",
+    re.I,
+)
 
 
 def _aliased_process_execution(text: str) -> tuple[re.Pattern[str] | None, set[str]]:
-    """Resolve common destructured/ESM child_process aliases that regex qualifiers miss."""
+    """Resolve emitted and source-level child_process aliases.
+
+    TypeScript/CommonJS output commonly turns an imported exec into a
+    namespace require followed by (0, child_process_1.exec)(command).
+    That call is semantically the same process sink as
+    require('child_process').exec(command); treating the generated form as
+    ordinary property access creates a real false negative. The namespace must
+    first be proven to come from child_process, and only an actual call shape
+    is accepted so property reads remain non-executable context.
+    """
     aliases: dict[str, str] = {}
+    namespace_aliases: set[str] = set()
     for match in _CHILD_PROCESS_DESTRUCTURE_RE.finditer(text):
         bindings = str(match.group("bindings") or match.group("imports") or "")
         for binding in bindings.split(","):
@@ -2853,11 +2961,55 @@ def _aliased_process_execution(text: str) -> tuple[re.Pattern[str] | None, set[s
             alias = parts[1].strip() if len(parts) == 2 else method
             if method in _CHILD_PROCESS_METHODS and re.fullmatch(r"[A-Za-z_$][\w$]*", alias):
                 aliases[alias] = method
-    called = {alias: method for alias, method in aliases.items() if re.search(rf"\b{re.escape(alias)}\s*\(", text)}
-    if not called:
+    namespace_aliases.update(match.group("alias") for match in _CHILD_PROCESS_NAMESPACE_RE.finditer(text))
+
+    patterns: list[str] = []
+    called_methods: set[str] = set()
+    # A generated bundle can contain dozens of transpiler aliases. Searching the
+    # whole source once per alias and once per method made this helper quadratic
+    # in practice (and could turn a normal multi-megabyte extension into a
+    # multi-minute scan). One combined pass preserves the same call-only
+    # semantics without repeatedly rescanning the bundle.
+    called: dict[str, str] = {}
+    if aliases:
+        alias_pattern = "|".join(re.escape(alias) for alias in sorted(aliases, key=len, reverse=True))
+        for match in re.finditer(rf"\b(?P<alias>{alias_pattern})\s*\(", text):
+            alias = match.group("alias")
+            called[alias] = aliases[alias]
+    if called:
+        patterns.append(r"\b(?:" + "|".join(re.escape(alias) for alias in sorted(called, key=len, reverse=True)) + r")\s*\(")
+        called_methods.update(called.values())
+
+    if namespace_aliases:
+        namespace_pattern = "|".join(
+            re.escape(namespace) for namespace in sorted(namespace_aliases, key=len, reverse=True)
+        )
+        method_pattern = "|".join(re.escape(method) for method in sorted(_CHILD_PROCESS_METHODS))
+        namespace_calls = re.compile(
+            rf"(?:\b(?P<direct_namespace>{namespace_pattern})\s*\.\s*(?P<direct_method>{method_pattern})\s*\(|"
+            rf"\(\s*0\s*,\s*(?P<wrapped_namespace>{namespace_pattern})\s*\.\s*(?P<wrapped_method>{method_pattern})\s*\)\s*\()"
+        )
+        namespace_methods: dict[str, set[str]] = {namespace: set() for namespace in namespace_aliases}
+        for match in namespace_calls.finditer(text):
+            namespace = match.group("direct_namespace") or match.group("wrapped_namespace")
+            method = match.group("direct_method") or match.group("wrapped_method")
+            if namespace and method:
+                namespace_methods[namespace].add(method)
+
+    for namespace in sorted(namespace_aliases, key=len, reverse=True):
+        methods = sorted(namespace_methods.get(namespace, set()))
+        if not methods:
+            continue
+        method_pattern = "|".join(re.escape(method) for method in methods)
+        patterns.append(
+            rf"(?:\b{re.escape(namespace)}\s*\.\s*(?:{method_pattern})\s*\(|"
+            rf"\(\s*0\s*,\s*{re.escape(namespace)}\s*\.\s*(?:{method_pattern})\s*\)\s*\()"
+        )
+        called_methods.update(methods)
+
+    if not patterns:
         return None, set()
-    pattern = re.compile(r"\b(?:" + "|".join(re.escape(alias) for alias in sorted(called, key=len, reverse=True)) + r")\s*\(")
-    return pattern, set(called.values())
+    return re.compile("(?:" + "|".join(patterns) + ")"), called_methods
 
 _CLIPBOARD_READ_RE = re.compile(r"(?:env\s*\.\s*)?clipboard\s*\.\s*readText\s*\(")
 
@@ -3151,6 +3303,79 @@ def _has_direct_credential_network_flow(text: str, secret_pattern: re.Pattern[st
     return False
 
 
+def _has_environment_data_network_flow(text: str) -> dict[str, Any] | None:
+    """Detect whole-environment collection reaching a local network sink.
+
+    ``process.env`` is common in build tooling and selected environment values
+    are normal telemetry or configuration. The high-specificity case is a full
+    environment object (or a serialization of it) that is then passed to an
+    outbound request. Keep this bounded to local assignments and request
+    arguments so unrelated environment reads and network clients stay clean.
+    """
+    whole_environment = re.compile(r"\bprocess\.env\b(?!\s*\.)", re.I)
+    assignment = re.compile(
+        r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]{1,1400})"
+    )
+    for match in assignment.finditer(text):
+        expression = match.group(2)
+        if not whole_environment.search(expression):
+            continue
+        variable = match.group(1)
+        tail_start = match.end()
+        tail = text[tail_start:min(len(text), tail_start + 4000)]
+        sink = NETWORK_SINK_RE.search(tail)
+        if not sink:
+            continue
+        sink_tail = tail[sink.start():min(len(tail), sink.start() + 1800)]
+        variable_ref = rf"\b{re.escape(variable)}\b"
+        if not re.search(
+            rf"(?:"
+            rf"(?:body|data|payload|params|query|searchParams)\s*:\s*(?:JSON\.stringify\s*\(\s*|encodeURIComponent\s*\(\s*)?{variable_ref}"
+            rf"|(?:end|write|send|post)\s*\(\s*(?:JSON\.stringify\s*\(\s*)?{variable_ref}"
+            rf"|(?:JSON\.stringify|encodeURIComponent)\s*\(\s*{variable_ref}"
+            rf"|(?:[?&][^;\n]{{0,120}}\+\s*|\+\s*){variable_ref}"
+            rf")",
+            sink_tail,
+            re.I,
+        ):
+            continue
+        return {
+            "correlation": "same-variable-local-flow",
+            "collection": _truncate_evidence_text(expression),
+            "transfer": _truncate_evidence_text(sink_tail),
+            "sink": "network-request",
+        }
+
+    # Also catch an inline request body/query, while keeping the window tight
+    # enough not to turn a file-wide process.env + fetch co-occurrence into a
+    # verdict-driving finding.
+    for sink in NETWORK_SINK_RE.finditer(text):
+        start = max(0, sink.start() - 800)
+        end = min(len(text), sink.start() + 1600)
+        context = text[start:end]
+        collection = whole_environment.search(context)
+        if not collection:
+            continue
+        if not re.search(
+            r"(?:"
+            r"(?:body|data|payload|params|query|searchParams)\s*:\s*(?:JSON\.stringify\s*\(\s*|encodeURIComponent\s*\(\s*)?\bprocess\.env\b(?!\s*\.)"
+            r"|(?:end|write|send|post)\s*\(\s*(?:JSON\.stringify\s*\(\s*)?\bprocess\.env\b(?!\s*\.)"
+            r"|(?:JSON\.stringify|encodeURIComponent)\s*\(\s*\bprocess\.env\b(?!\s*\.)"
+            r"|(?:[?&][^;\n]{0,120}\+\s*|\+\s*)\bprocess\.env\b(?!\s*\.)"
+            r")",
+            context,
+            re.I,
+        ):
+            continue
+        return {
+            "correlation": "inline-environment-to-network-flow",
+            "collection": _truncate_evidence_text(collection.group(0)),
+            "transfer": _truncate_evidence_text(context),
+            "sink": "network-request",
+        }
+    return None
+
+
 def _has_systematic_credential_harvesting_exfiltration(
     text: str,
     secret_refs: list[tuple[str, str]],
@@ -3368,8 +3593,9 @@ def _apply_sandbox_observations(extensions: list[ExtensionReport], observations:
     if not observations:
         return
     by_id = {extension.extension_id: extension for extension in extensions}
-    for extension_id, items in observations.items():
-        extension = by_id.get(extension_id)
+    by_instance = {_runtime_instance_key(extension): extension for extension in extensions}
+    for observation_key, items in observations.items():
+        extension = by_instance.get(observation_key) or by_id.get(observation_key)
         if extension is None:
             continue
         for item in _aggregate_sandbox_observations(items):
@@ -3807,6 +4033,9 @@ def _merge_dynamic_runtime_bundle(
     base_metadata = sandbox_bundle.get("metadata") if isinstance(sandbox_bundle.get("metadata"), dict) else {}
     runs = runtime_bundle.get("runs") if isinstance(runtime_bundle.get("runs"), list) else []
     required_ids = runtime_bundle.get("required_extension_ids") if isinstance(runtime_bundle.get("required_extension_ids"), list) else []
+    base_required_ids = base_metadata.get("runtime_required_ids") if isinstance(base_metadata.get("runtime_required_ids"), list) else []
+    required_instances = runtime_bundle.get("runtime_required_instances") if isinstance(runtime_bundle.get("runtime_required_instances"), list) else []
+    base_required_instances = base_metadata.get("runtime_required_instances") if isinstance(base_metadata.get("runtime_required_instances"), list) else []
     metadata = dict(base_metadata)
     metadata.update({
         "status": "executed",
@@ -3816,9 +4045,14 @@ def _merge_dynamic_runtime_bundle(
         "backend": "bubblewrap",
         "runtime_policy": "capability-gated-v1",
         "runtime_runs": runs,
-        "runtime_required_ids": sorted({str(item) for item in required_ids if str(item)}),
+        "runtime_required_ids": sorted({str(item) for item in [*base_required_ids, *required_ids] if str(item)}),
+        "runtime_required_instances": sorted({
+            str(item)
+            for item in [*base_required_instances, *required_instances]
+            if str(item)
+        }),
         "observation_count": sum(len(value) for value in merged_extensions.values()),
-        "observed_kinds": _observation_kinds(merged_extensions),
+        "observed_kinds": _observation_kinds(merged_extensions, runs=runs),
         "external_syscall_trace": bool(
             runtime_bundle.get("external_syscall_trace") is True
             or base_metadata.get("external_syscall_trace") is True
@@ -3831,40 +4065,87 @@ def _merge_dynamic_runtime_bundle(
     return {"extensions": merged_extensions, "metadata": metadata}
 
 
-def _observation_kinds(observations: dict[str, list[dict[str, Any]]]) -> dict[str, list[str]]:
+def _observation_kinds(
+    observations: dict[str, list[dict[str, Any]]],
+    *,
+    runs: list[dict[str, Any]] | None = None,
+) -> dict[str, list[str]]:
     """Expose bounded runtime event types without persisting raw paths/commands."""
-    return {
-        extension_id: sorted({str(item.get("kind")) for item in items if item.get("kind")})
-        for extension_id, items in observations.items()
-        if items
+    labels = {
+        str(item.get("instance_id")): str(item.get("extension_id"))
+        for item in (runs or [])
+        if isinstance(item, dict) and item.get("instance_id") and item.get("extension_id")
     }
+    result: dict[str, set[str]] = {}
+    for instance_key, items in observations.items():
+        if not items:
+            continue
+        label = labels.get(instance_key, instance_key)
+        result.setdefault(label, set()).update(
+            str(item.get("kind")) for item in items if item.get("kind")
+        )
+    return {key: sorted(values) for key, values in result.items()}
 
 
 def _apply_sandbox_provider(extensions: list[ExtensionReport], bundle: dict[str, Any]) -> None:
     metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
     observations = bundle.get("extensions") if isinstance(bundle.get("extensions"), dict) else {}
+    runtime_runs = [
+        item for item in (metadata.get("runtime_runs") or [])
+        if isinstance(item, dict)
+    ]
     status = str(metadata.get("status") or "not-requested")
     required_ids = {str(item).lower() for item in metadata.get("runtime_required_ids", []) if str(item)}
+    required_instances = {str(item) for item in metadata.get("runtime_required_instances", []) if str(item)}
     for extension in extensions:
-        items = observations.get(extension.extension_id, [])
-        required = extension.extension_id.lower() in required_ids
+        instance_key = _runtime_instance_key(extension)
+        items = _runtime_observations_for_report(observations, extension)
+        required = (
+            instance_key in required_instances
+            or (not required_instances and extension.extension_id.lower() in required_ids)
+        )
         provider_status = status
         execution = str(metadata.get("execution") or "not-run")
         executed = bool(metadata.get("executed"))
-        if metadata.get("runtime_policy") == "capability-gated-v1" and not required:
-            provider_status = "not-applicable"
-            execution = "policy-gated"
-            executed = False
-        elif required and provider_status == "executed":
-            # Runtime execution is a completed provider outcome. Keep the
-            # execution mode in the evidence, but use the canonical provider
-            # status vocabulary so coverage finalization does not downgrade a
-            # successfully executed capability-gated run to incomplete.
-            provider_status = "completed"
+        runtime_run = next(
+            (
+                item for item in runtime_runs
+                if str(item.get("instance_id") or "") == instance_key
+            ),
+            None,
+        )
+        if runtime_run is None and not required_instances:
+            matching_runs = [
+                item for item in runtime_runs
+                if str(item.get("extension_id") or "").lower() == extension.extension_id.lower()
+            ]
+            if len(matching_runs) == 1:
+                runtime_run = matching_runs[0]
         error_count = sum(
             1 for item in items
             if isinstance(item, dict) and str(item.get("kind") or "") in {"runtime_timeout", "sandbox_error"}
         ) if isinstance(items, list) else 0
+        if metadata.get("runtime_policy") == "capability-gated-v1" and not required:
+            provider_status = "not-applicable"
+            execution = "policy-gated"
+            executed = False
+        elif required:
+            # Aggregate metadata and observations are not enough to establish
+            # coverage. Require the exact per-artifact run receipt as well, so
+            # a truncated/malformed runtime bundle cannot turn into a green
+            # provider merely because it contains no explicit sandbox_error.
+            run_status = str(runtime_run.get("status") or "") if runtime_run else "missing"
+            run_trace = bool(runtime_run and runtime_run.get("external_syscall_trace") is True)
+            if provider_status in {"executed", "completed"} and run_status == "completed" and run_trace:
+                provider_status = "completed"
+            else:
+                provider_status = "failed"
+                if not error_count:
+                    error_count = 1
+        if required and runtime_run is not None and str(runtime_run.get("status") or "") != "completed":
+            error_count = max(error_count, 1)
+        if required and runtime_run is None:
+            error_count = max(error_count, 1)
         if required and error_count:
             provider_status = "failed"
         provider = {
@@ -3885,13 +4166,25 @@ def _apply_sandbox_provider(extensions: list[ExtensionReport], bundle: dict[str,
             "external_syscall_trace": bool(
                 required
                 and metadata.get("external_syscall_trace") is True
+                and runtime_run is not None
+                and runtime_run.get("status") == "completed"
+                and runtime_run.get("external_syscall_trace") is True
                 and error_count == 0
             ),
             "external_syscall_trace_available": bool(
                 metadata.get("external_syscall_trace_available") is True
             ),
+            "runtime_run_status": str(runtime_run.get("status") or "missing") if runtime_run else "missing",
         }
         extension.analysis_coverage.setdefault("providers", {})["dynamic_sandbox"] = provider
+        # Runtime coverage is attached after the static provider pass has
+        # already been finalized. Recompute the aggregate completeness here so
+        # a failed required sandbox run cannot leave a clean executable
+        # extension in the approval path simply because static coverage was
+        # complete. This is deliberately fail-closed: required dynamic
+        # evidence is either completed with an external trace or the artifact
+        # remains incomplete and cannot be allowed.
+        _finalize_analysis_coverage(extension.analysis_coverage)
         if required:
             declared = {
                 str(capability.get("id") or "")
@@ -3978,7 +4271,7 @@ def _build_report(
         "schema_version": "0.1.0",
         "scan_id": f"scan_{now.strftime('%Y%m%d%H%M%S')}",
         "created_at": now.isoformat().replace("+00:00", "Z"),
-        "scanner_build": os.environ.get("IDE_SCANNER_BUILD_SHA", "").strip() or "unknown",
+        "scanner_build": scanner_build(),
         "ruleset_version": RULESET_VERSION,
         "policy_version": POLICY_VERSION,
         "privacy_mode": (
@@ -4492,7 +4785,7 @@ def _safe_extract_vsix(vsix_path: Path, destination: Path) -> dict[str, Any]:
 
 
 def _worker_environment() -> dict[str, str]:
-    environment = os.environ.copy()
+    environment = safe_child_environment()
     source_root = str(Path(__file__).resolve().parent.parent)
     environment["PYTHONPATH"] = os.pathsep.join(
         item for item in (source_root, environment.get("PYTHONPATH", "")) if item
@@ -4603,16 +4896,62 @@ def _walk_extension_files(path: Path) -> list[Path]:
     return files
 
 
-def _declared_entrypoints(manifest: dict[str, Any], path: Path) -> set[str]:
+def _enforce_extension_resource_budget(path: Path) -> None:
+    """Reject oversized local artifacts before expensive analysis begins.
+
+    The caller isolates this exception into an explicit incomplete report. We
+    intentionally do not truncate a package and call it analyzed: partial
+    executable coverage would make a clean result unsafe to publish.
+    """
+    if not path.is_dir():
+        return
+    total_bytes = 0
+    file_count = 0
+    for dirpath, dirnames, filenames in os.walk(path):
+        dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS]
+        for filename in filenames:
+            candidate = Path(dirpath, filename)
+            if candidate.is_symlink():
+                continue
+            try:
+                size = candidate.stat().st_size
+            except OSError as exc:
+                raise ValueError(f"Artifact resource budget could not stat {candidate}: {exc}") from exc
+            file_count += 1
+            total_bytes += size
+            if file_count > MAX_EXTENSION_FILES:
+                raise ValueError(
+                    f"Artifact exceeds scan resource budget: {file_count} files > {MAX_EXTENSION_FILES}"
+                )
+            if total_bytes > MAX_EXTENSION_BYTES:
+                raise ValueError(
+                    "Artifact exceeds scan resource budget: "
+                    f"{total_bytes} bytes > {MAX_EXTENSION_BYTES}"
+                )
+def _declared_entrypoints(manifest: dict[str, Any], path: Path) -> tuple[set[str], list[str]]:
     entrypoints: set[str] = set()
-    for key in ("main", "browser"):
-        value = manifest.get(key)
-        if isinstance(value, str) and value.strip():
-            declared = _normalize_package_path(value)
-            entrypoints.add(_resolve_node_entrypoint(path, declared))
+    optional_missing: list[str] = []
+    main_value = manifest.get("main")
+    browser_value = manifest.get("browser")
+    has_main = isinstance(main_value, str) and bool(main_value.strip())
+    if has_main:
+        declared_main = _normalize_package_path(str(main_value))
+        entrypoints.add(_resolve_node_entrypoint(path, declared_main))
+    if isinstance(browser_value, str) and browser_value.strip():
+        declared_browser = _normalize_package_path(browser_value)
+        resolved_browser = _resolve_node_entrypoint(path, declared_browser)
+        if path.joinpath(*resolved_browser.split("/")).is_file() or not has_main:
+            entrypoints.add(resolved_browser)
+        else:
+            # VS Code's `browser` field is an alternate web target. A package
+            # with a valid desktop `main` remains analyzable for desktop
+            # installs even when it does not ship the optional web bundle.
+            # Preserve the omission as evidence without turning it into a
+            # false incomplete verdict for the artifact being scanned.
+            optional_missing.append(resolved_browser)
     if not entrypoints and (path / "extension.js").is_file():
         entrypoints.add("extension.js")
-    return entrypoints
+    return entrypoints, optional_missing
 
 
 def _normalize_package_path(value: str) -> str:
@@ -4639,7 +4978,12 @@ def _resolve_node_entrypoint(root: Path, declared: str) -> str:
     return declared
 
 
-def _new_analysis_coverage(files: list[Path], entrypoints: set[str], path: Path) -> dict[str, Any]:
+def _new_analysis_coverage(
+    files: list[Path],
+    entrypoints: set[str],
+    path: Path,
+    optional_missing_entrypoints: list[str] | None = None,
+) -> dict[str, Any]:
     all_paths = {file.relative_to(path).as_posix() for file in files}
     candidates = sorted(
         rel for rel in all_paths
@@ -4662,6 +5006,7 @@ def _new_analysis_coverage(files: list[Path], entrypoints: set[str], path: Path)
         "declared_entrypoints": sorted(entrypoints),
         "resolved_entrypoints": sorted(entrypoints & all_paths),
         "missing_entrypoints": sorted(entrypoints - all_paths),
+        "optional_missing_entrypoints": sorted(set(optional_missing_entrypoints or [])),
         "executable_candidates": candidates,
         "excluded_generated_files": excluded_generated,
         "analyzed_executable_files": [],
@@ -4688,21 +5033,31 @@ def _finalize_analysis_coverage(coverage: dict[str, Any]) -> None:
     missing = list(coverage.get("missing_entrypoints") or [])
     failures = list(coverage.get("read_failures") or [])
     oversized = list(coverage.get("oversized_files") or [])
-    limitations: list[str] = []
+    # Preserve request/worker-level limitations already attached to the
+    # coverage object. Rebuilding this list from structural fields alone used
+    # to erase the real reason an artifact was quarantined (for example, an
+    # extension-size budget failure) and replace it with the less useful
+    # generic ``scan-aborted`` manifest label.
+    limitations: list[str] = list(coverage.get("limitations") or [])
+
+    def add_limitation(value: str) -> None:
+        if value and value not in limitations:
+            limitations.append(value)
+
     manifest_validation = coverage.get("manifest_validation")
     if isinstance(manifest_validation, dict) and not manifest_validation.get("valid"):
-        limitations.append(
+        add_limitation(
             f"Manifest (package.json) is not trustworthy: {manifest_validation.get('status') or 'invalid'}"
         )
     if missing:
-        limitations.append(f"Missing declared entrypoint(s): {', '.join(missing[:3])}")
+        add_limitation(f"Missing declared entrypoint(s): {', '.join(missing[:3])}")
     if failures:
-        limitations.append(f"Could not read {len(failures)} executable file(s)")
+        add_limitation(f"Could not read {len(failures)} executable file(s)")
     if oversized:
-        limitations.append(f"Skipped {len(oversized)} executable file(s) larger than {MAX_TEXT_BYTES} bytes")
+        add_limitation(f"Skipped {len(oversized)} executable file(s) larger than {MAX_TEXT_BYTES} bytes")
     required = candidates - set(oversized) - set(failures)
     if required - analyzed:
-        limitations.append(f"Did not analyze {len(required - analyzed)} executable candidate(s)")
+        add_limitation(f"Did not analyze {len(required - analyzed)} executable candidate(s)")
     providers = coverage.get("providers") if isinstance(coverage.get("providers"), dict) else {}
     required_providers = {
         item.strip().lower()
@@ -4719,7 +5074,7 @@ def _finalize_analysis_coverage(coverage: dict[str, Any]) -> None:
         provider["required"] = True
         providers[name] = provider
         if provider.get("status") != "completed":
-            limitations.append(f"Required provider {name} did not complete")
+            add_limitation(f"Required provider {name} did not complete")
     completed_required_providers = sorted(
         name
         for name in required_providers
@@ -4740,10 +5095,15 @@ def _finalize_analysis_coverage(coverage: dict[str, Any]) -> None:
         # yet the artifact ships generated/minified runtime code. Reporting 100%
         # here would claim full analysis of code that was never inspected.
         executable_file_coverage = 0
-        limitations.append(
+        add_limitation(
             f"No analyzable entrypoint was reachable; {len(excluded_generated)} generated/minified "
             "runtime file(s) were present but not analyzed"
         )
+    elif limitations:
+        # A worker- or request-level failure can arrive before the scanner has
+        # discovered any executable candidates. An empty denominator must not
+        # turn that failed analysis into a misleading 100% coverage claim.
+        executable_file_coverage = 0
     else:
         executable_file_coverage = 100
     coverage["executable_file_coverage_percent"] = executable_file_coverage
@@ -4758,6 +5118,16 @@ def _is_ignored_static_asset(rel: str) -> bool:
     normalized = rel.replace("\\", "/").lower()
     generated_prefixes = (
         "node_modules/",
+        # Documentation/demo JavaScript is shipped for the extension's
+        # project website or README examples, not loaded by the IDE runtime.
+        # Keep the bytes in artifact-wide inventory/YARA coverage, but do not
+        # let a docs service worker or example page grant an extension a
+        # runtime network/process capability. Declared entrypoints still
+        # override this filter and are always analyzed.
+        "docs/",
+        "documentation/",
+        "examples/",
+        "example/",
         "assets/pdf.js/build/",
         "bundled/libs/debugpy/_vendored/",
         "drawio/src/main/webapp/math/es5/",
