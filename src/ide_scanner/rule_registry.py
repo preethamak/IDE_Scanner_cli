@@ -4,7 +4,7 @@ from .classification_policy import POLICY_VERSION
 from .models import RuleMetadata
 from .rules import CODE_RULES
 
-RULESET_VERSION = "2026.09.24-policy-v3-calibration.42-hidden-remote-workspace-task"
+RULESET_VERSION = "2026.09.24-policy-v3-calibration.43-runtime-local-ipc"
 
 
 _RULE_OVERRIDES: dict[str, dict[str, object]] = {

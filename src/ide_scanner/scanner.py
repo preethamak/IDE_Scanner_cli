@@ -3682,6 +3682,19 @@ def _runtime_unexpected_capability_finding(
     }.get(kind)
     if not runtime_capability:
         return None
+    # NSS, systemd user lookup, and syslog commonly use Unix-domain sockets.
+    # The syscall tracer reports these as connect/network attempts, but they
+    # are local host services rather than external network access. Do not turn
+    # ordinary language-server startup into a hidden-network finding; retain
+    # the low-severity runtime observation itself for transparency.
+    if runtime_capability == "network":
+        destination_samples = item.get("destination_samples")
+        if isinstance(destination_samples, list) and destination_samples and all(
+            isinstance(destination, str)
+            and (destination.startswith("/") or destination.startswith("unix:"))
+            for destination in destination_samples
+        ):
+            return None
     declared = {
         str(capability.get("id") or "")
         for capability in extension.capabilities

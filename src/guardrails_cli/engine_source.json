@@ -41,11 +41,11 @@
     "public_outcomes.py": "bf09348f839c167d24b6bb7734ae10437f1295e8d86b64fd58c4a1a847e54102",
     "registry.py": "634115528d1022a63d5940285f146843769fe0d02d210895782b69c88ddca10d",
     "report_bundle.py": "49c0aa45490ba3c6e47f253ae60427fb2d8f1a8ef90a0da77c8da164c765e91f",
-    "rule_registry.py": "c69a1d78e75d0bed32ff50cbe93ede26c56172ba3b5c695e319c66c3ac2698e1",
+    "rule_registry.py": "9e4a54984c82f60707183ac0cc29483673ebfe0b25ca2bc609452daf0739cefc",
     "rules.py": "8dff3f8a6c65891beea6da8bf442a75c76460a4b4134f38b2cfa7960f14da6f7",
     "runtime_dependencies.py": "df2c37870dbbec892a199d0b2e63eb4f56466de9098d12ed884368c7b451c5c1",
     "sandbox_runner.py": "f70df79efdf3033f83ab470627e78ea338f0d0a9f007144c469ef8a87e94e64a",
-    "scanner.py": "eb63ef99a3a7107cf49488c8289e200321cc3fc83cccb4dd1c494323e3f177d9",
+    "scanner.py": "7de9ee19f44958e3538fba7c28de6e86b32bc76fd7959413e35209487ac318c4",
     "service.py": "569d5d65c95a0f15c5d870f3c536bc4d06ce478844c976c58970bb636cf8b2dc",
     "trust_tiers.py": "d27e08fbcaca8e60e7320afc4069a80be830b0b76a56da9d0011479e4eb61c43",
     "value_flow.py": "12b9ebb53522babee3ec4150a2da9df36231ef8ff792a523bf0ec366cf75246e",
@@ -53,5 +53,5 @@
   },
   "schema_version": 2,
   "source_component": "guardrails-scanner-runtime",
-  "source_revision": "9329921d1d69c270c376d89d39b7fef4de743f72"
+  "source_revision": "6d03256342b4b8755dcf8cfcc4cd031a9dd8c241"
 }
