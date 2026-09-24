@@ -45,7 +45,7 @@
     "rules.py": "8dff3f8a6c65891beea6da8bf442a75c76460a4b4134f38b2cfa7960f14da6f7",
     "runtime_dependencies.py": "df2c37870dbbec892a199d0b2e63eb4f56466de9098d12ed884368c7b451c5c1",
     "sandbox_runner.py": "f70df79efdf3033f83ab470627e78ea338f0d0a9f007144c469ef8a87e94e64a",
-    "scanner.py": "7de9ee19f44958e3538fba7c28de6e86b32bc76fd7959413e35209487ac318c4",
+    "scanner.py": "936badfd249e4e824d47af0b98ac13b2e593bc96f2cb150b4610a9ec5a5a61b3",
     "service.py": "569d5d65c95a0f15c5d870f3c536bc4d06ce478844c976c58970bb636cf8b2dc",
     "trust_tiers.py": "d27e08fbcaca8e60e7320afc4069a80be830b0b76a56da9d0011479e4eb61c43",
     "value_flow.py": "12b9ebb53522babee3ec4150a2da9df36231ef8ff792a523bf0ec366cf75246e",
@@ -53,5 +53,5 @@
   },
   "schema_version": 2,
   "source_component": "guardrails-scanner-runtime",
-  "source_revision": "88f0c4027a4becae06e0229bfcf2dcdd6b5ded0d"
+  "source_revision": "ae6c01ffb2afae4087d6d0c70c36e7a792e761f4"
 }

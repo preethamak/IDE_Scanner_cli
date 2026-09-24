@@ -5125,6 +5125,19 @@ def _finalize_analysis_coverage(coverage: dict[str, Any]) -> None:
         for name, provider in providers.items()
         if isinstance(provider, dict) and provider.get("required") is True
     )
+    # A scan can be finalized once during artifact analysis, before the
+    # request-level providers (for example dependency intelligence) are
+    # attached.  A later finalization must not preserve that provisional
+    # failure after the provider has reported success; otherwise every deep
+    # worker result is permanently quarantined as incomplete despite complete
+    # provider evidence.
+    completed_provider_limitations = {
+        f"Required provider {name} did not complete"
+        for name in required_providers
+        if isinstance(providers.get(name), dict)
+        and providers[name].get("status") == "completed"
+    }
+    limitations = [item for item in limitations if item not in completed_provider_limitations]
     for name in sorted(required_providers):
         provider = providers.get(name) if isinstance(providers.get(name), dict) else {}
         provider["required"] = True
