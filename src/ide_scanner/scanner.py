@@ -1101,12 +1101,11 @@ _DYNAMIC_RUNTIME_CAPABILITIES = frozenset({
     "wasm_runtime",
 })
 
-# An activation process that exits unsuccessfully did not complete the
-# required runtime contract, even if it emitted some authenticated events
-# first. Keep the event as evidence, but do not let the receipt become
-# publication-complete. Lifecycle-script failures are intentionally excluded:
-# they are a separate contextual observation and the activation probe still
-# runs afterward.
+# Timeouts and sandbox errors are hard runtime-coverage failures. A nonzero
+# activation exit is handled separately: when authenticated events and the
+# external trace exist, the receipt remains visibly failed but the dynamic
+# phase is still covered. Lifecycle-script failures are contextual and the
+# activation probe still runs afterward.
 _RUNTIME_COVERAGE_FAILURE_KINDS = frozenset({
     "runtime_timeout",
     "sandbox_error",
@@ -1219,6 +1218,23 @@ def _runtime_execution_failure(runtime: dict[str, Any], items: list[dict[str, An
     )
 
 
+def _authenticated_entrypoint_error(items: list[dict[str, Any]]) -> bool:
+    """Return whether activation exited nonzero after usable runtime evidence.
+
+    Extensions commonly import VS Code host APIs or optional child tools that
+    are unavailable in a standalone Node harness.  The sandbox still records
+    authenticated events and the external syscall trace in that case.  Keep
+    the nonzero receipt visible, but do not confuse it with a missing trace or
+    a harness failure; those remain hard coverage failures.
+    """
+    kinds = {
+        str(item.get("kind") or "")
+        for item in items
+        if isinstance(item, dict)
+    }
+    return "runtime_entrypoint_error" in kinds and not kinds.intersection({"runtime_timeout", "sandbox_error"})
+
+
 def _apply_local_dynamic_runtime(
     targets: list[dict[str, str]],
     extensions: list[ExtensionReport],
@@ -1287,7 +1303,10 @@ def _apply_local_dynamic_runtime(
                     )
                     if trace_available:
                         runtime_bundle["external_syscall_trace_available"] = True
-                    run_record["external_syscall_trace"] = bool(trace_available and not runtime_failed)
+                    run_record["external_syscall_trace"] = bool(
+                        trace_available
+                        and (not runtime_failed or _authenticated_entrypoint_error(items))
+                    )
                 if runtime_failed:
                     run_record["error"] = execution_error or "Runtime execution did not complete successfully."
             except Exception as exc:  # noqa: BLE001 - runtime failure is disclosed and fail-closed
@@ -1403,9 +1422,12 @@ def scan_marketplace_extension(
                             and trace.get("requested") is True
                             and trace.get("available") is True
                         )
-                        if trace_available:
-                            runtime_bundle["external_syscall_trace_available"] = True
-                        run_record["external_syscall_trace"] = bool(trace_available and not runtime_failed)
+                    if trace_available:
+                        runtime_bundle["external_syscall_trace_available"] = True
+                    run_record["external_syscall_trace"] = bool(
+                        trace_available
+                        and (not runtime_failed or _authenticated_entrypoint_error(items))
+                    )
                     if runtime_failed:
                         run_record["error"] = execution_error or "Runtime execution did not complete successfully."
                 except Exception as exc:  # noqa: BLE001 - runtime failures become disclosed provider evidence
@@ -4181,6 +4203,9 @@ def _apply_sandbox_provider(extensions: list[ExtensionReport], bundle: dict[str,
             1 for item in items
             if isinstance(item, dict) and str(item.get("kind") or "") in {"runtime_timeout", "sandbox_error"}
         ) if isinstance(items, list) else 0
+        run_status = str(runtime_run.get("status") or "") if runtime_run else "missing"
+        run_trace = bool(runtime_run and runtime_run.get("external_syscall_trace") is True)
+        tolerated_entrypoint_error = False
         if metadata.get("runtime_policy") == "capability-gated-v1" and not required:
             provider_status = "not-applicable"
             execution = "policy-gated"
@@ -4190,20 +4215,41 @@ def _apply_sandbox_provider(extensions: list[ExtensionReport], bundle: dict[str,
             # coverage. Require the exact per-artifact run receipt as well, so
             # a truncated/malformed runtime bundle cannot turn into a green
             # provider merely because it contains no explicit sandbox_error.
-            run_status = str(runtime_run.get("status") or "") if runtime_run else "missing"
-            run_trace = bool(runtime_run and runtime_run.get("external_syscall_trace") is True)
-            if provider_status in {"executed", "completed"} and run_status == "completed" and run_trace:
+            tolerated_entrypoint_error = bool(
+                runtime_run is not None
+                and _authenticated_entrypoint_error(items)
+                and run_trace
+                and run_status == "failed"
+            )
+            if provider_status in {"executed", "completed"} and (
+                (run_status == "completed" and run_trace) or tolerated_entrypoint_error
+            ):
                 provider_status = "completed"
             else:
                 provider_status = "failed"
                 if not error_count:
                     error_count = 1
-        if required and runtime_run is not None and str(runtime_run.get("status") or "") != "completed":
+        if (
+            required
+            and runtime_run is not None
+            and str(runtime_run.get("status") or "") != "completed"
+            and not _authenticated_entrypoint_error(items)
+        ):
             error_count = max(error_count, 1)
         if required and runtime_run is None:
             error_count = max(error_count, 1)
         if required and error_count:
             provider_status = "failed"
+        elif required and provider_status in {"executed", "completed"}:
+            # A host-dependent activation can exit nonzero after emitting a
+            # valid authenticated trace. Preserve that failed receipt and its
+            # INFO finding, while treating the dynamic provider as covered;
+            # only timeouts, sandbox errors, missing receipts, or missing
+            # traces make coverage incomplete.
+            if (run_status == "completed" and run_trace) or tolerated_entrypoint_error:
+                provider_status = "completed"
+            else:
+                provider_status = "failed"
         provider = {
             "provider": "dynamic_sandbox",
             "status": provider_status,
@@ -4223,7 +4269,10 @@ def _apply_sandbox_provider(extensions: list[ExtensionReport], bundle: dict[str,
                 required
                 and metadata.get("external_syscall_trace") is True
                 and runtime_run is not None
-                and runtime_run.get("status") == "completed"
+                and (
+                    runtime_run.get("status") == "completed"
+                    or tolerated_entrypoint_error
+                )
                 and runtime_run.get("external_syscall_trace") is True
                 and error_count == 0
             ),
@@ -4235,11 +4284,11 @@ def _apply_sandbox_provider(extensions: list[ExtensionReport], bundle: dict[str,
         extension.analysis_coverage.setdefault("providers", {})["dynamic_sandbox"] = provider
         # Runtime coverage is attached after the static provider pass has
         # already been finalized. Recompute the aggregate completeness here so
-        # a failed required sandbox run cannot leave a clean executable
-        # extension in the approval path simply because static coverage was
-        # complete. This is deliberately fail-closed: required dynamic
-        # evidence is either completed with an external trace or the artifact
-        # remains incomplete and cannot be allowed.
+        # a missing trace, timeout, or sandbox failure cannot leave a clean
+        # executable extension in the approval path simply because static
+        # coverage was complete. A host-dependent nonzero entrypoint receipt
+        # is allowed only when its authenticated trace is present and remains
+        # visible in the provider status and INFO finding.
         _finalize_analysis_coverage(extension.analysis_coverage)
         if required:
             declared = {
