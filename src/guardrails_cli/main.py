@@ -190,13 +190,18 @@ def cmd_inventory(args: argparse.Namespace) -> int:
         raise ValueError("Device id may contain letters, numbers, dots, underscores, colons, and hyphens (maximum 160 characters).")
     system = platform.system().lower()
     platform_name = {"darwin": "macos", "windows": "windows", "linux": "linux"}.get(system, "other")
-    extensions: dict[str, dict[str, str]] = {}
+    extensions: dict[str, dict[str, Any]] = {}
     for row in rows:
         extension_id = str(row.get("extension_id") or "").strip()
         version = str(row.get("version") or "").strip()
         if not extension_id or not version:
             continue
-        extensions[extension_id.lower()] = {"extension_id": extension_id, "version": version, "registry": "unknown"}
+        extensions[extension_id.lower()] = {
+            "extension_id": extension_id,
+            "version": version,
+            "registry": "unknown",
+            "artifact_sha256": _inventory_artifact_hash(row),
+        }
     payload = {
         "device": {
             "id": device_id,
@@ -214,7 +219,22 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     os.replace(temporary, destination)
     print(f"Exported {len(payload['extensions'])} installed extensions to {destination}.")
     print("Import this file from Team Workspace → Inventory. Local paths and source files were not included.")
+    print("Exact artifact hashes are included only when the scanner supplied one; installed folders otherwise remain version-only.")
     return 0
+
+
+def _inventory_artifact_hash(row: dict[str, Any]) -> str | None:
+    """Return a verified upstream artifact hash without hashing an installed folder.
+
+    An installed extension directory is not the published VSIX byte stream, so
+    hashing it here would create an identity that cannot be compared with a
+    Marketplace release hash. Only accept a hash already produced by an exact
+    artifact scan.
+    """
+    value = str(row.get("artifact_sha256") or "").strip().lower()
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        return None
+    return value
 
 
 def cmd_policy(args: argparse.Namespace) -> int:

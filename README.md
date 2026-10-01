@@ -41,6 +41,11 @@ guardrails report verify report.zip
 guardrails help
 ```
 
+Inventory exports include `artifact_sha256` only when an exact-artifact scan has
+already supplied a verified published-artifact hash. Installed extension folders
+otherwise remain version-only; the CLI does not hash a folder and label it as a
+VSIX identity.
+
 Guardrails reports the decision, risk score, malware evidence score, analysis
 coverage, provider status, and detailed findings. Reports can be exported as
 HTML, ZIP, JSON, or Markdown.

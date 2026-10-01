@@ -26,6 +26,7 @@ sensitive capability surfaces; extension code is never executed on the host.
   rules      Browse or search the local detection-rule catalog
   metrics    Explain decisions, scores, evidence, and coverage
   policy     Check installations or published artifact hashes against an enterprise policy
+  inventory  Export installed versions for Team Workspace, with exact hashes when available
   doctor     Check the scanner engine, analyzers, runtime sandbox, terminal, and IDE discovery
   help       Open this manual or a specific topic
   tui        Explicitly open the interactive Local Scan application
@@ -64,6 +65,14 @@ Installed extensions:
   guardrails scan --ide cursor --all --yes
   guardrails scan --search solidity --select 1
   guardrails scan --extension publisher.extension
+
+Team Workspace inventory:
+
+  guardrails inventory --ide cursor --output team-inventory.json
+
+Inventory from an installed directory is version-only because the directory is
+not the published VSIX byte stream. An exact `artifact_sha256` is carried only
+when an upstream exact-artifact scan has already supplied and verified it.
 
 Other artifacts:
 

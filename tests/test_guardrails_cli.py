@@ -94,8 +94,35 @@ class GuardrailsCliTests(unittest.TestCase):
         self.assertIn("Exported 1 installed extensions", message)
         self.assertEqual(payload["device"], {"id": "team-laptop-1", "name": "Team laptop", "platform": "linux"})
         self.assertEqual(payload["source"], "cli")
-        self.assertEqual(payload["extensions"], [{"extension_id": "sample.one", "version": "1.0.0", "registry": "unknown"}])
+        self.assertEqual(payload["extensions"], [{"extension_id": "sample.one", "version": "1.0.0", "registry": "unknown", "artifact_sha256": None}])
         self.assertNotIn("/private", str(payload))
+
+    def test_inventory_export_keeps_only_verified_upstream_artifact_hashes(self) -> None:
+        rows = [
+            {
+                "client": "Cursor",
+                "path": "/private/extensions/one",
+                "extension_id": "sample.one",
+                "version": "1.0.0",
+                "artifact_sha256": "A" * 64,
+            },
+            {
+                "client": "Cursor",
+                "path": "/private/extensions/two",
+                "extension_id": "sample.two",
+                "version": "2.0.0",
+                "artifact_sha256": "not-a-published-hash",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory, patch("guardrails_cli.main.installed_extensions", return_value=rows):
+            output = Path(directory) / "inventory.json"
+            code, _message, error = self.run_cli(["inventory", "--ide", "cursor", "--output", str(output)])
+            payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual((code, error), (0, ""))
+        self.assertEqual(payload["extensions"], [
+            {"extension_id": "sample.one", "version": "1.0.0", "registry": "unknown", "artifact_sha256": "a" * 64},
+            {"extension_id": "sample.two", "version": "2.0.0", "registry": "unknown", "artifact_sha256": None},
+        ])
 
     def test_inventory_export_rejects_unsafe_device_identifiers(self) -> None:
         rows = [{"client": "Cursor", "extension_id": "sample.one", "version": "1.0.0"}]
