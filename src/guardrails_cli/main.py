@@ -20,6 +20,7 @@ from .help_manual import TOPICS, manual
 from .report_reader import read_report, report_view, validate_report
 from .risk_brief import brief_exit_code, build_risk_brief, render_risk_brief, write_risk_brief
 from .policy import check_installed_extensions, load_policy_bundle, verify_artifact
+from .collector import build_collector_snapshot, default_device_id, upload_collector_snapshot
 from .scan_service import run_with_profile, scan_installed
 from .scanner_adapter import (
     discover_paths,
@@ -69,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_doctor(args)
         if args.command == "inventory":
             return cmd_inventory(args)
+        if args.command == "collect":
+            return cmd_collect(args)
         if args.command == "policy":
             return cmd_policy(args)
         if args.command == "help":
@@ -164,6 +167,14 @@ def build_parser() -> argparse.ArgumentParser:
     inventory.add_argument("--output", "--out", dest="output", required=True, help="Write workspace-compatible JSON to this path.")
     inventory.add_argument("--device-id", help="Stable non-secret device identifier. Defaults to a local machine and IDE fingerprint.")
     inventory.add_argument("--device-name", help="Human-readable device label. Defaults to the IDE and operating system.")
+    collect = subparsers.add_parser("collect", help="Send installed extension and MCP capability inventory to a GuardRails workspace.")
+    collect.add_argument("--ide", choices=IDE_CHOICES, required=True, help="Collect one IDE client as a distinct device.")
+    collect.add_argument("--server", default="https://abscissa.dev", help="GuardRails server URL.")
+    collect.add_argument("--api-key", help="Workspace API key. Defaults to GUARDRAILS_API_KEY.")
+    collect.add_argument("--device-id", help="Stable non-secret device identifier.")
+    collect.add_argument("--device-name", help="Human-readable device label.")
+    collect.add_argument("--timeout", type=int, default=30, help="Upload timeout in seconds (1-120).")
+    collect.add_argument("--dry-run", action="store_true", help="Print the privacy-preserving snapshot without sending it.")
     policy = subparsers.add_parser("policy", help="Check installed extensions against an enterprise GuardRails policy bundle.")
     policy_subparsers = policy.add_subparsers(dest="policy_command", required=True)
     policy_check = policy_subparsers.add_parser("check", help="Check installed extension IDs and versions against a deny-by-default bundle.")
@@ -220,6 +231,27 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     print(f"Exported {len(payload['extensions'])} installed extensions to {destination}.")
     print("Import this file from Team Workspace → Inventory. Local paths and source files were not included.")
     print("Exact artifact hashes are included only when the scanner supplied one; installed folders otherwise remain version-only.")
+    return 0
+
+
+def cmd_collect(args: argparse.Namespace) -> int:
+    if not 1 <= args.timeout <= 120:
+        raise ValueError("Collector timeout must be between 1 and 120 seconds.")
+    rows = [row for row in installed_extensions() if _ide_key(str(row.get("client") or "")) == args.ide]
+    if not rows:
+        raise ValueError(f"No installed extensions were detected for {args.ide}.")
+    device_id = args.device_id or default_device_id(args.ide)
+    if not _valid_device_id(device_id):
+        raise ValueError("Device id may contain letters, numbers, dots, underscores, colons, and hyphens (maximum 160 characters).")
+    snapshot = build_collector_snapshot(ide=args.ide, device_id=device_id, device_name=args.device_name or f"{args.ide.title()} on {platform.system() or 'Unknown OS'}", extensions=rows)
+    if args.dry_run:
+        print(json.dumps(snapshot, indent=2, sort_keys=True))
+        return 0
+    api_key = args.api_key or os.environ.get("GUARDRAILS_API_KEY", "")
+    if not api_key:
+        raise ValueError("Provide --api-key or set GUARDRAILS_API_KEY.")
+    receipt = upload_collector_snapshot(args.server, api_key, snapshot, timeout=args.timeout)
+    print(f"Collector accepted device {receipt.get('device_id', device_id)} with {receipt.get('inventory', {}).get('extensions', 0)} extensions and {receipt.get('capability_graph', {}).get('subjects', 0)} non-extension capabilities.")
     return 0
 
 
