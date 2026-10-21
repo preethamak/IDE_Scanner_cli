@@ -37,6 +37,8 @@ sensitive capability surfaces; extension code is never executed on the host.
   report view PATH                 Display a saved ZIP or JSON report
   report verify PATH               Validate report structure and identities
   report export PATH --format FMT  Convert a saved report without rescanning
+  report attest PATH --output FILE  Create a SHA-256 digest attestation
+  report attest-verify PATH --attestation FILE  Verify report bytes offline
   rules list                       List the complete rule catalog
   rules search QUERY               Search rule titles, IDs, and descriptions
   rules show RULE_ID               Explain one detection rule

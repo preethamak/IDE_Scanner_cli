@@ -50,6 +50,21 @@ Guardrails reports the decision, risk score, malware evidence score, analysis
 coverage, provider status, and detailed findings. Reports can be exported as
 HTML, ZIP, JSON, or Markdown.
 
+## Offline report identity
+
+Create a portable SHA-256 digest record when attaching a GuardRails report to a
+release approval, ticket, or audit package. Verify the same bytes later without
+depending on the website:
+
+```bash
+guardrails report attest review-report.zip --output review-report.attestation.json
+guardrails report attest-verify review-report.zip --attestation review-report.attestation.json
+```
+
+The record includes scan, scanner-build, and ruleset metadata. It proves that a
+report file has not changed since attestation; it is not a signer identity or a
+substitute for a future signed-report workflow.
+
 ## Pre-recommendation briefs
 
 Before an agent recommends a Marketplace extension, create a brief for the
