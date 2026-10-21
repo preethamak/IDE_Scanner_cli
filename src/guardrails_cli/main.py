@@ -18,6 +18,7 @@ from .exporters.markdown import export_markdown
 from .environment import doctor_checks
 from .help_manual import TOPICS, manual
 from .report_reader import read_report, report_view, validate_report
+from .report_attestation import create_attestation, verify_attestation
 from .risk_brief import brief_exit_code, build_risk_brief, render_risk_brief, write_risk_brief
 from .policy import check_installed_extensions, load_policy_bundle, verify_artifact
 from .scan_service import run_with_profile, scan_installed
@@ -147,6 +148,12 @@ def build_parser() -> argparse.ArgumentParser:
     view.add_argument("--extension", help="Show one exact extension ID from the saved report.")
     verify = report_subparsers.add_parser("verify", aliases=["validate"], help="Verify report structure and identities.")
     verify.add_argument("path")
+    attest = report_subparsers.add_parser("attest", help="Create a portable SHA-256 digest attestation for a report.")
+    attest.add_argument("path")
+    attest.add_argument("--output", required=True)
+    attest_verify = report_subparsers.add_parser("attest-verify", help="Verify a report file against a digest attestation.")
+    attest_verify.add_argument("path")
+    attest_verify.add_argument("--attestation", required=True)
     export = report_subparsers.add_parser("export", help="Export without recalculating scanner evidence.")
     export.add_argument("path")
     export.add_argument("--format", choices=("zip", "html", "md", "json"), required=True)
@@ -493,6 +500,10 @@ def cmd_report(args: argparse.Namespace) -> int:
         if len(errors) > 20:
             print(color(f"- {len(errors) - 20} additional verification error(s) omitted", "red"))
         return 0 if ok else 1
+    if args.report_command == "attest":
+        output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True); output.write_text(json.dumps(create_attestation(args.path), indent=2, sort_keys=True) + "\n", encoding="utf-8"); print(f"Wrote digest attestation to {output}."); return 0
+    if args.report_command == "attest-verify":
+        ok, message = verify_attestation(args.path, args.attestation); print(message); return 0 if ok else 1
     data = read_report(args.path)
     if args.format == "zip":
         if Path(args.path).suffix.lower() != ".zip":
