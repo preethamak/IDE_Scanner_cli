@@ -19,7 +19,7 @@ from .environment import doctor_checks
 from .help_manual import TOPICS, manual
 from .report_reader import read_report, report_view, validate_report
 from .risk_brief import brief_exit_code, build_risk_brief, render_risk_brief, write_risk_brief
-from .policy import check_installed_extensions, load_policy_bundle, verify_artifact
+from .policy import check_capability_policy, check_installed_extensions, load_capability_policy_bundle, load_policy_bundle, verify_artifact
 from .collector import build_collector_snapshot, default_device_id, upload_collector_snapshot
 from .scan_service import run_with_profile, scan_installed
 from .scanner_adapter import (
@@ -185,6 +185,9 @@ def build_parser() -> argparse.ArgumentParser:
     policy_verify.add_argument("--bundle", required=True, help="GuardRails enterprise policy JSON exported from the workspace.")
     policy_verify.add_argument("--artifact", required=True, help="Path to the published VSIX or other exact artifact file.")
     policy_verify.add_argument("--format", choices=("terminal", "json"), default="terminal", help="Output format.")
+    policy_capabilities = policy_subparsers.add_parser("capabilities", help="Enforce a downloaded GuardRails capability policy export.")
+    policy_capabilities.add_argument("--bundle", required=True, help="Capability policy JSON exported from the workspace.")
+    policy_capabilities.add_argument("--format", choices=("terminal", "json"), default="terminal", help="Output format.")
     help_command = subparsers.add_parser("help", help="Read the Guardrails command and workflow manual.")
     help_command.add_argument("topic", nargs="?", choices=TOPICS)
     subparsers.add_parser("tui", help="Open the interactive Local Scan terminal application.")
@@ -270,8 +273,16 @@ def _inventory_artifact_hash(row: dict[str, Any]) -> str | None:
 
 
 def cmd_policy(args: argparse.Namespace) -> int:
-    if args.policy_command not in {"check", "verify"}:
+    if args.policy_command not in {"check", "verify", "capabilities"}:
         raise ValueError("A policy command is required.")
+    if args.policy_command == "capabilities":
+        result = check_capability_policy(load_capability_policy_bundle(args.bundle))
+        if args.format == "json": print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            summary = result["summary"]
+            print(section("GuardRails capability policy"))
+            print(f"Subjects: {summary['subjects']}  Allowed: {summary['allowed']}  Denied: {summary['denied']}  Approval required: {summary['approval_required']}")
+        return 0 if result["summary"]["compliant"] else 1
     bundle = load_policy_bundle(args.bundle)
     if args.policy_command == "verify":
         result = verify_artifact(bundle, args.artifact)

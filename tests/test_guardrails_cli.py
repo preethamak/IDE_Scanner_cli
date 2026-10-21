@@ -150,6 +150,16 @@ class GuardrailsCliTests(unittest.TestCase):
         self.assertIn("Collector accepted device laptop-1", output)
         self.assertEqual(upload.call_args.args[:2], ("https://example.test", "grk_live_test"))
 
+    def test_capability_policy_enforcement_fails_for_approval_required_subjects(self) -> None:
+        from guardrails_cli.policy import CAPABILITY_POLICY_SCHEMA
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            payload = {"schema": CAPABILITY_POLICY_SCHEMA, "generated_at": "2026-10-21T00:00:00Z", "workspace_id": "team-1", "policy_version": 1, "default_action": "deny", "grants": [], "graph": {"generated_at": "x", "subjects": []}, "evaluations": [{"subject_id": "mcp_server:github", "outcome": "prompt", "requests": []}]}
+            payload["policy_hash"] = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+            path = Path(directory) / "policy.json"; path.write_text(json.dumps(payload), encoding="utf-8")
+            code, output, error = self.run_cli(["policy", "capabilities", "--bundle", str(path)])
+        self.assertEqual((code, error), (1, "")); self.assertIn("Approval required: 1", output)
+
     def test_tui_requires_an_interactive_terminal(self) -> None:
         code, _output, error = self.run_cli(["tui"])
         self.assertEqual(code, 2)
