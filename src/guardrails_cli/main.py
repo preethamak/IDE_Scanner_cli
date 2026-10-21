@@ -18,6 +18,7 @@ from .exporters.markdown import export_markdown
 from .environment import doctor_checks
 from .help_manual import TOPICS, manual
 from .report_reader import read_report, report_view, validate_report
+from .report_diff import compare_reports
 from .risk_brief import brief_exit_code, build_risk_brief, render_risk_brief, write_risk_brief
 from .policy import check_installed_extensions, load_policy_bundle, verify_artifact
 from .scan_service import run_with_profile, scan_installed
@@ -147,6 +148,10 @@ def build_parser() -> argparse.ArgumentParser:
     view.add_argument("--extension", help="Show one exact extension ID from the saved report.")
     verify = report_subparsers.add_parser("verify", aliases=["validate"], help="Verify report structure and identities.")
     verify.add_argument("path")
+    diff = report_subparsers.add_parser("diff", help="Compare exact-extension evidence between two saved reports.")
+    diff.add_argument("before")
+    diff.add_argument("after")
+    diff.add_argument("--format", choices=("terminal", "json"), default="terminal")
     export = report_subparsers.add_parser("export", help="Export without recalculating scanner evidence.")
     export.add_argument("path")
     export.add_argument("--format", choices=("zip", "html", "md", "json"), required=True)
@@ -483,6 +488,13 @@ def _marketplace_reference(value: str, *, version: str | None = None) -> tuple[s
 
 
 def cmd_report(args: argparse.Namespace) -> int:
+    if args.report_command == "diff":
+        result = compare_reports(report_view(read_report(args.before)), report_view(read_report(args.after)))
+        if args.format == "json": print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(section("GuardRails report diff")); print(f"Changed extensions: {result['changed']}");
+            for item in result["extensions"]: print(f"- {item['extension_id']}: {item['change']}")
+        return 0
     if args.report_command == "view":
         return _view_report(args.path, show_all=args.all, extension_id=args.extension)
     if args.report_command in {"verify", "validate"}:
