@@ -10,6 +10,7 @@ from typing import Any
 POLICY_SCHEMA = "guardrails.enterprise-policy.v1"
 SHA256 = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
 EXTENSION_ID = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_.-]+$")
+RELATIONSHIPS = {"extensionPack", "extensionDependencies"}
 
 
 def load_policy_bundle(path: str | Path) -> dict[str, Any]:
@@ -60,6 +61,39 @@ def _validate_entries(entries: list[Any]) -> None:
             raise ValueError(f"GuardRails policy entry {index} requires an exact artifact SHA-256.")
         if str(entry.get("analysis_status") or "") != "complete":
             raise ValueError(f"GuardRails policy entry {index} does not have complete analysis.")
+        _validate_relationship_contract(entry, index)
+
+
+def _validate_relationship_contract(entry: dict[str, Any], index: int) -> None:
+    contract = entry.get("relationship_contract")
+    if contract is None:
+        return
+    if not isinstance(contract, dict):
+        raise ValueError(f"GuardRails policy entry {index} has an invalid relationship contract.")
+    declared = contract.get("declared")
+    if not isinstance(declared, list) or not isinstance(contract.get("requires_separate_review"), bool):
+        raise ValueError(f"GuardRails policy entry {index} has an invalid relationship contract.")
+    seen: set[tuple[str, str]] = set()
+    requires_review = False
+    for relationship_index, item in enumerate(declared):
+        if not isinstance(item, dict):
+            raise ValueError(f"GuardRails policy entry {index} relationship {relationship_index} is not an object.")
+        extension_id = str(item.get("extension_id") or "")
+        relationship = str(item.get("relationship") or "")
+        status = str(item.get("status") or "")
+        version = item.get("resolved_version")
+        artifact_sha256 = item.get("resolved_artifact_sha256")
+        key = (relationship, extension_id.lower())
+        if relationship not in RELATIONSHIPS or not EXTENSION_ID.fullmatch(extension_id) or not status or key in seen:
+            raise ValueError(f"GuardRails policy entry {index} has an invalid declared extension relationship.")
+        if version is not None and not isinstance(version, str):
+            raise ValueError(f"GuardRails policy entry {index} has an invalid related release version.")
+        if artifact_sha256 is not None and (not isinstance(artifact_sha256, str) or not SHA256.fullmatch(artifact_sha256)):
+            raise ValueError(f"GuardRails policy entry {index} has an invalid related artifact SHA-256.")
+        seen.add(key)
+        requires_review = requires_review or status != "scanned" or not version or not artifact_sha256
+    if requires_review and contract["requires_separate_review"] is not True:
+        raise ValueError(f"GuardRails policy entry {index} must require separate review for incomplete related releases.")
 
 
 def _validate_enforcement(payload: dict[str, Any]) -> None:
@@ -127,6 +161,11 @@ def check_installed_extensions(
         version = str(installation.get("version") or "").strip()
         entry = allowed.get((extension_id.lower(), version))
         if entry:
+            relationship_contract = entry.get("relationship_contract") if isinstance(entry.get("relationship_contract"), dict) else {
+                "declared": [],
+                "requires_separate_review": False,
+            }
+            requires_relationship_review = relationship_contract.get("requires_separate_review") is True
             results.append({
                 "extension_id": extension_id,
                 "version": version,
@@ -139,8 +178,14 @@ def check_installed_extensions(
                     "requires_explicit_review": False,
                     "review_reason": None,
                 },
+                "relationship_contract": relationship_contract,
+                "relationship_review": "required" if requires_relationship_review else "not_required",
                 "hash_verification": "required_not_available_for_installed_directory",
-                "reason": "The installed ID and version match an approved exact release, but the local directory is not itself the published VSIX. Verify the published artifact with policy verify before treating the installation as compliant.",
+                "reason": (
+                    "The installed ID and version match an approved exact release, but the local directory is not itself the published VSIX. "
+                    "Verify the published artifact with policy verify before treating the installation as compliant. "
+                    + ("Declared related extensions require their own completed exact-release review; this parent approval does not cover them." if requires_relationship_review else "")
+                ).strip(),
             })
         else:
             results.append({
@@ -150,11 +195,14 @@ def check_installed_extensions(
                 "status": "blocked",
                 "decision": "deny",
                 "artifact_sha256": "",
+                "relationship_contract": {"declared": [], "requires_separate_review": False},
+                "relationship_review": "not_applicable",
                 "hash_verification": "not_applicable",
                 "reason": "The exact extension ID and version are not present in the GuardRails allowlist.",
             })
     blocked = [item for item in results if item["status"] == "blocked"]
     unverified = [item for item in results if item["status"] == "version_allowed_unverified"]
+    relationship_review_required = [item for item in results if item.get("relationship_review") == "required"]
     return {
         "schema": "guardrails.policy-check.v1",
         "policy_hash": str(bundle.get("policy_hash") or ""),
@@ -166,6 +214,7 @@ def check_installed_extensions(
             "allowed": len(results) - len(blocked),
             "blocked": len(blocked),
             "unverified": len(unverified),
+            "relationship_review_required": len(relationship_review_required),
             "compliant": not blocked and not unverified,
         },
     }
