@@ -14,9 +14,9 @@ _WALKER_PATH = Path(__file__).parent / "js_ast" / "walker.js"
 # Keep AST work below the scanner's overall text boundary. Acorn's in-memory
 # tree can amplify a generated bundle by tens of times; allowing a 64 MiB input
 # and a 2 GiB V8 heap can make the operating system kill the entire scanner
-# before it can report incomplete coverage. Larger entrypoints retain bounded
-# raw-text and YARA coverage, while the AST provider fails closed with the
-# explicit ``resource-skipped`` status.
+# before it can report incomplete coverage. Larger generated bundles retain
+# bounded raw-text and YARA coverage, while larger non-generated source files
+# fail closed with the explicit ``resource-skipped`` status.
 JS_AST_TIMEOUT_SECONDS = 90
 JS_AST_MAX_INPUT_BYTES = 32 * 1024 * 1024
 JS_AST_MAX_OLD_SPACE_MB = 1024

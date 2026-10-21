@@ -185,6 +185,39 @@ class EngineParityTests(unittest.TestCase):
         self.assertIn("dynamic-shell-execution", rule_ids)
         self.assertIn("download-and-execute", rule_ids)
 
+    def test_cli_records_extension_pack_and_dependency_install_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "package.json").write_text(
+                json.dumps({
+                    "publisher": "parity",
+                    "name": "relationship-fixture",
+                    "version": "1.0.0",
+                    "main": "extension.js",
+                    "extensionPack": ["Vendor.Theme", "vendor.theme"],
+                    "extensionDependencies": ["vendor.helper", "bad id", 7],
+                }),
+                encoding="utf-8",
+            )
+            (root / "extension.js").write_text("exports.activate = () => undefined;", encoding="utf-8")
+
+            report = scan_paths([root], online=False)
+
+        extension = report["extensions"][0]
+        inventory = extension["artifact_inventory"]["extension_relationship_inventory"]
+        self.assertEqual(
+            inventory["entries"],
+            [
+                {"extension_id": "vendor.helper", "relationship": "extension_dependency", "declared_in": "extensionDependencies"},
+                {"extension_id": "vendor.theme", "relationship": "extension_pack", "declared_in": "extensionPack"},
+            ],
+        )
+        self.assertEqual(len(inventory["invalid_entries"]), 2)
+        findings = {item["rule_id"]: item for item in extension["findings"]}
+        self.assertEqual(findings["extension-install-surface"]["effective_severity"], "INFO")
+        self.assertEqual(findings["malformed-extension-relationship"]["effective_severity"], "MEDIUM")
+        self.assertEqual(extension["decision"], "review")
+
 
 if __name__ == "__main__":
     unittest.main()
