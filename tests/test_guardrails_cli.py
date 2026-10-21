@@ -12,6 +12,7 @@ from guardrails_cli import main as cli
 from guardrails_cli.risk_brief import build_risk_brief
 from guardrails_cli.ui.prompts import prompt_choice
 from guardrails_cli.environment import doctor_checks
+from guardrails_cli.collector import COLLECTOR_SNAPSHOT_SCHEMA, collector_idempotency_key
 
 
 class GuardrailsCliTests(unittest.TestCase):
@@ -138,6 +139,11 @@ class GuardrailsCliTests(unittest.TestCase):
         self.assertEqual((code, error), (0, ""))
         self.assertIn('"extension_id": "sample.one"', output)
         self.assertNotIn("/private", output)
+
+    def test_collector_snapshot_declares_schema_and_has_stable_retry_key(self) -> None:
+        snapshot = {"schema_version": COLLECTOR_SNAPSHOT_SCHEMA, "inventory": {"device": {"id": "laptop-1"}}, "graph": {"subjects": []}}
+        self.assertEqual(collector_idempotency_key(snapshot), collector_idempotency_key(dict(snapshot)))
+        self.assertTrue(collector_idempotency_key(snapshot).startswith("grc-"))
 
     def test_collect_uses_workspace_key_and_prints_server_receipt(self) -> None:
         rows = [{"client": "Cursor", "extension_id": "sample.one", "version": "1.0.0"}]
