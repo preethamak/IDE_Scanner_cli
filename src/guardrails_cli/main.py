@@ -14,6 +14,7 @@ from typing import Any
 from . import __version__
 from .exporters.html import export_html
 from .exporters.json_export import export_json
+from .exporters.sarif import export_sarif
 from .exporters.markdown import export_markdown
 from .environment import doctor_checks
 from .help_manual import TOPICS, manual
@@ -38,7 +39,7 @@ from .ui.tables import key_values, table, terminal_width, truncate
 from .ui.theme import color, severity_label, severity_style
 
 
-EXPORT_FORMATS = ("terminal", "zip", "html", "md", "json")
+EXPORT_FORMATS = ("terminal", "zip", "html", "md", "json", "sarif")
 IDE_CHOICES = ("vscode", "cursor", "windsurf", "vscodium", "insiders")
 PICKER_PAGE_SIZE = 10
 
@@ -149,7 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("path")
     export = report_subparsers.add_parser("export", help="Export without recalculating scanner evidence.")
     export.add_argument("path")
-    export.add_argument("--format", choices=("zip", "html", "md", "json"), required=True)
+    export.add_argument("--format", choices=("zip", "html", "md", "json", "sarif"), required=True)
     export.add_argument("--output", "--out", dest="output", required=True)
 
     rules = subparsers.add_parser("rules", help="Browse the scanner rule catalog.")
@@ -503,6 +504,8 @@ def cmd_report(args: argparse.Namespace) -> int:
             _atomic_copy(source, destination)
     elif args.format == "json":
         export_json(data, args.output)
+    elif args.format == "sarif":
+        export_sarif(report_view(data), args.output)
     else:
         view = report_view(data)
         if args.format == "html":
@@ -623,6 +626,8 @@ def _export_fresh(report: dict[str, Any], fmt: str, output: str, *, source: str,
         export_markdown(view, output)
     elif fmt == "json":
         export_json(report, output)
+    elif fmt == "sarif":
+        export_sarif(display_report(report, source=source, profile=profile), output)
     else:
         raise ValueError(f"Unsupported export format: {fmt}")
 
