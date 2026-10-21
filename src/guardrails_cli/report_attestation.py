@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .report_reader import read_report, report_view
 
@@ -20,7 +20,12 @@ def create_attestation(report_path: str | Path) -> dict[str, Any]:
     return {"schema": SCHEMA, "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "report": {"filename": path.name, "sha256": _sha256(path), "bytes": path.stat().st_size, "scan_id": metadata.get("scan_id") or view.get("scan_id"), "scanner_build": metadata.get("scanner_build"), "ruleset_version": metadata.get("ruleset_version")}, "signature": None, "note": "Digest attestation only. It proves file identity, not signer identity."}
 
 
-def verify_attestation(report_path: str | Path, attestation_path: str | Path) -> tuple[bool, str]:
+def verify_attestation(
+    report_path: str | Path,
+    attestation_path: str | Path,
+    *,
+    required_claims: Mapping[str, str] | None = None,
+) -> tuple[bool, str]:
     try:
         attestation = json.loads(Path(attestation_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -31,7 +36,25 @@ def verify_attestation(report_path: str | Path, attestation_path: str | Path) ->
     actual = _sha256(Path(report_path)) if Path(report_path).is_file() else ""
     if actual != report.get("sha256"):
         return False, "Report SHA-256 does not match the attestation."
-    return True, "Report SHA-256 matches the digest attestation."
+    try:
+        view = report_view(read_report(Path(report_path)))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return False, f"Could not read report claims: {exc}"
+    metadata = view.get("metadata") if isinstance(view.get("metadata"), dict) else {}
+    actual_claims = {
+        "scan_id": metadata.get("scan_id") or view.get("scan_id"),
+        "scanner_build": metadata.get("scanner_build"),
+        "ruleset_version": metadata.get("ruleset_version"),
+    }
+    for name, actual_value in actual_claims.items():
+        if report.get(name) != actual_value:
+            return False, f"Attested {name} does not match the report."
+    for name, expected_value in (required_claims or {}).items():
+        if name not in actual_claims:
+            return False, f"Unsupported required attestation claim: {name}."
+        if actual_claims[name] != expected_value:
+            return False, f"Required {name} does not match the report."
+    return True, "Report SHA-256 and required provenance claims match the digest attestation."
 
 
 def _sha256(path: Path) -> str:
