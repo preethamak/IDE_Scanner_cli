@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import platform
 import re
 import socket
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+COLLECTOR_SNAPSHOT_SCHEMA = "guardrails.collector-snapshot.v1"
 
 
 def build_collector_snapshot(*, ide: str, device_id: str, device_name: str, extensions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -36,6 +40,7 @@ def build_collector_snapshot(*, ide: str, device_id: str, device_name: str, exte
             "source": "collector",
         })
     return {
+        "schema_version": COLLECTOR_SNAPSHOT_SCHEMA,
         "inventory": {"device": {"id": device_id, "name": device_name, "platform": platform_name}, "reported_at": now, "source": "api", "extensions": sorted(inventory.values(), key=lambda item: item["extension_id"].lower())},
         "graph": {"generatedAt": now, "subjects": subjects, "relationships": []},
     }
@@ -61,15 +66,23 @@ def discover_mcp_servers(ide: str, home: Path | None = None) -> dict[str, dict[s
     return servers
 
 
-def upload_collector_snapshot(server: str, api_key: str, snapshot: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
-    request = Request(server.rstrip("/") + "/api/collector/capabilities", data=json.dumps(snapshot).encode("utf-8"), method="POST", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "guardrails-collector/0.2"})
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as error:
-        raise ValueError(f"Collector upload failed: HTTP {error.code} {error.read().decode('utf-8', errors='replace')}") from error
-    except URLError as error:
-        raise OSError(f"Collector upload failed: {error.reason}") from error
+def collector_idempotency_key(snapshot: dict[str, Any]) -> str:
+    return "grc-" + hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def upload_collector_snapshot(server: str, api_key: str, snapshot: dict[str, Any], timeout: int = 30, retries: int = 2) -> dict[str, Any]:
+    key = collector_idempotency_key(snapshot)
+    for attempt in range(retries + 1):
+        request = Request(server.rstrip("/") + "/api/collector/capabilities", data=json.dumps(snapshot).encode("utf-8"), method="POST", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Idempotency-Key": key, "User-Agent": "guardrails-collector/0.2"})
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            if error.code not in {408, 429, 500, 502, 503, 504} or attempt == retries: raise ValueError(f"Collector upload failed: HTTP {error.code} {error.read().decode('utf-8', errors='replace')}") from error
+        except URLError as error:
+            if attempt == retries: raise OSError(f"Collector upload failed: {error.reason}") from error
+        time.sleep(min(2 ** attempt, 4))
+    raise OSError("Collector upload failed after retries.")
 
 
 def default_device_id(ide: str) -> str:
