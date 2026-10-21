@@ -50,6 +50,29 @@ Guardrails reports the decision, risk score, malware evidence score, analysis
 coverage, provider status, and detailed findings. Reports can be exported as
 HTML, ZIP, JSON, or Markdown.
 
+## GitHub Actions
+
+Use the published GuardRails action to make an exact extension artifact review
+part of a release pipeline. It scans the supplied VSIX before installation,
+adds the decision and coverage floor to the job summary, exposes structured
+outputs, and uploads the canonical JSON evidence report even when the policy
+fails.
+
+```yaml
+- uses: preethamak/IDE_Scanner_cli@main
+  id: guardrails
+  with:
+    artifact: dist/my-extension.vsix
+    profile: standard
+    fail-on: review
+
+- run: echo "GuardRails decision: ${{ steps.guardrails.outputs.decision }}"
+```
+
+Pin a release tag or commit SHA in production. See
+[the integration guide](docs/github-actions.md) for deterministic advisory
+snapshots, output semantics, and failure handling.
+
 ## Pre-recommendation briefs
 
 Before an agent recommends a Marketplace extension, create a brief for the
