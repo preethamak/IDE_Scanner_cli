@@ -164,3 +164,15 @@ class PolicyTests(unittest.TestCase):
             result = verify_artifact(bundle, artifact)
             self.assertEqual(result["status"], "allowed")
             self.assertEqual(result["matched_releases"][0]["version"], "1.2.3")
+
+    def test_published_parent_artifact_requires_related_release_review(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "extension.vsix"
+            artifact.write_bytes(b"exact-published-parent-bytes")
+            bundle = self.bundle()
+            bundle["entries"][0]["artifact_sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()  # type: ignore[index]
+            bundle["enforcement"]["guardrails"]["exact_release_allowlist"] = bundle["entries"]  # type: ignore[index]
+            bundle["policy_hash"] = compute_policy_hash(bundle)
+            result = verify_artifact(bundle, artifact)
+            self.assertEqual(result["status"], "relationship_review_required")
+            self.assertIn("related extensions require", result["reason"])

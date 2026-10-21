@@ -238,12 +238,18 @@ def verify_artifact(bundle: dict[str, Any], artifact: str | Path) -> dict[str, A
         and str(entry.get("decision") or "").lower() in {"allow", "exception"}
         and str(entry.get("artifact_sha256") or "").lower() == artifact_sha256
     ]
+    relationship_review_required = any(
+        isinstance(entry.get("relationship_contract"), dict)
+        and entry["relationship_contract"].get("requires_separate_review") is True
+        for entry in entries
+    )
+    status = "relationship_review_required" if entries and relationship_review_required else "allowed" if entries else "blocked"
     return {
         "schema": "guardrails.policy-verify.v1",
         "policy_hash": str(bundle.get("policy_hash") or ""),
         "artifact": str(target.resolve()),
         "artifact_sha256": artifact_sha256,
-        "status": "allowed" if entries else "blocked",
+        "status": status,
         "matched_releases": [
             {
                 "extension_id": str(entry.get("extension_id") or ""),
@@ -254,7 +260,9 @@ def verify_artifact(bundle: dict[str, Any], artifact: str | Path) -> dict[str, A
         ],
         "hash_verification": "published_artifact_sha256_exact",
         "reason": (
-            "The artifact bytes match an approved exact release in the GuardRails policy."
+            "The artifact bytes match an approved parent release, but declared related extensions require their own completed exact-release review."
+            if relationship_review_required
+            else "The artifact bytes match an approved exact release in the GuardRails policy."
             if entries
             else "The artifact bytes do not match any approved exact release in the GuardRails policy."
         ),
