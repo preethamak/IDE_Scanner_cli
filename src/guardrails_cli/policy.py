@@ -8,6 +8,7 @@ from typing import Any
 
 
 POLICY_SCHEMA = "guardrails.enterprise-policy.v1"
+CAPABILITY_POLICY_SCHEMA = "guardrails.capability-policy.v1"
 SHA256 = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
 EXTENSION_ID = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_.-]+$")
 
@@ -108,6 +109,36 @@ def compute_policy_hash(payload: dict[str, Any]) -> str:
     }
     encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def load_capability_policy_bundle(path: str | Path) -> dict[str, Any]:
+    target = Path(path)
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Capability policy bundle is not valid JSON: {target}") from exc
+    if not isinstance(payload, dict) or payload.get("schema") != CAPABILITY_POLICY_SCHEMA or payload.get("default_action") != "deny":
+        raise ValueError("Unsupported GuardRails capability policy bundle.")
+    expected = str(payload.get("policy_hash") or "").lower()
+    unsigned = {key: value for key, value in payload.items() if key != "policy_hash"}
+    actual = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    if not SHA256.fullmatch(expected) or actual != expected:
+        raise ValueError("Capability policy bundle integrity check failed.")
+    if not isinstance(payload.get("evaluations"), list):
+        raise ValueError("Capability policy bundle has no evaluations.")
+    return payload
+
+
+def check_capability_policy(bundle: dict[str, Any]) -> dict[str, Any]:
+    results = []
+    for entry in bundle.get("evaluations", []):
+        if not isinstance(entry, dict):
+            continue
+        outcome = str(entry.get("outcome") or "deny")
+        results.append({"subject_id": str(entry.get("subject_id") or "unknown"), "outcome": outcome, "requests": list(entry.get("requests") or [])})
+    denied = [item for item in results if item["outcome"] == "deny"]
+    prompts = [item for item in results if item["outcome"] == "prompt"]
+    return {"schema": "guardrails.capability-policy-check.v1", "policy_hash": bundle.get("policy_hash"), "results": results, "summary": {"subjects": len(results), "allowed": len(results) - len(denied) - len(prompts), "denied": len(denied), "approval_required": len(prompts), "compliant": not denied and not prompts}}
 
 
 def check_installed_extensions(
