@@ -50,6 +50,15 @@ Guardrails reports the decision, risk score, malware evidence score, analysis
 coverage, provider status, and detailed findings. Reports can be exported as
 HTML, ZIP, JSON, or Markdown.
 
+For GitHub Code Scanning and other SARIF consumers, export the canonical scan
+as SARIF 2.1.0. Findings retain the exact extension version and artifact hash
+as result properties; package-level observations are not mislabeled as source
+file locations.
+
+```bash
+guardrails scan --file dist/example.vsix --format sarif --output guardrails.sarif
+```
+
 ## Pre-recommendation briefs
 
 Before an agent recommends a Marketplace extension, create a brief for the
