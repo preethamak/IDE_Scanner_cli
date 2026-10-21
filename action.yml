@@ -33,6 +33,14 @@ inputs:
     description: Upload the canonical JSON report as a workflow artifact, including on policy failure.
     required: false
     default: "true"
+  sbom-path:
+    description: Path for the CycloneDX 1.5 SBOM projected from the completed report.
+    required: false
+    default: guardrails-sbom.cdx.json
+  upload-sbom:
+    description: Generate and upload the CycloneDX SBOM when a canonical report is available.
+    required: false
+    default: "true"
 outputs:
   decision:
     description: Worst GuardRails decision from the report.
@@ -49,6 +57,9 @@ outputs:
   report-valid:
     description: Whether the generated JSON report could be parsed.
     value: ${{ steps.publish.outputs.report-valid }}
+  sbom-valid:
+    description: Whether a CycloneDX SBOM was generated from the canonical report.
+    value: ${{ steps.sbom.outputs.sbom-valid }}
 runs:
   using: composite
   steps:
@@ -78,12 +89,34 @@ runs:
       if: always()
       shell: bash
       run: python "$GITHUB_ACTION_PATH/scripts/github_action_result.py" --report "${{ inputs.report-path }}" --scan-exit-code "${{ steps.scan.outcome == 'success' && '0' || '1' }}"
+    - name: Generate CycloneDX SBOM
+      id: sbom
+      if: ${{ always() && inputs.upload-sbom == 'true' }}
+      shell: bash
+      env:
+        INPUT_REPORT_PATH: ${{ inputs.report-path }}
+        INPUT_SBOM_PATH: ${{ inputs.sbom-path }}
+      run: |
+        if guardrails report sbom "$INPUT_REPORT_PATH" --output "$INPUT_SBOM_PATH"; then
+          echo "sbom-valid=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "sbom-valid=false" >> "$GITHUB_OUTPUT"
+          echo "GuardRails could not generate an SBOM because no canonical report was available." >&2
+        fi
     - name: Upload GuardRails evidence
       if: ${{ always() && inputs.upload-report == 'true' }}
       uses: actions/upload-artifact@v4
       with:
         name: guardrails-extension-report
         path: ${{ inputs.report-path }}
+        if-no-files-found: warn
+        retention-days: 30
+    - name: Upload GuardRails SBOM
+      if: ${{ always() && inputs.upload-sbom == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: guardrails-extension-sbom
+        path: ${{ inputs.sbom-path }}
         if-no-files-found: warn
         retention-days: 30
     - name: Enforce GuardRails outcome
