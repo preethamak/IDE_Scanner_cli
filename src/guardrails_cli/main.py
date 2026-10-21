@@ -266,7 +266,7 @@ def cmd_policy(args: argparse.Namespace) -> int:
         print(section("GuardRails enterprise policy"))
         print(f"Policy: {result['policy_hash'] or 'unidentified'}")
         print("Default action: DENY")
-        print(f"Installed: {summary['installed']}  Version-allowed: {summary['allowed']}  Unverified: {summary['unverified']}  Blocked: {summary['blocked']}")
+        print(f"Installed: {summary['installed']}  Version-allowed: {summary['allowed']}  Unverified: {summary['unverified']}  Related review: {summary['relationship_review_required']}  Blocked: {summary['blocked']}")
         if result["results"]:
             rows = [[item["status"].upper(), item["extension_id"], item["version"], item["client"]] for item in result["results"]]
             print(table(["Status", "Extension", "Version", "IDE"], rows, max_widths=[10, 42, 18, 14]))
@@ -276,6 +276,9 @@ def cmd_policy(args: argparse.Namespace) -> int:
             ]
             if explicit:
                 print(f"Capability note: {len(explicit)} allowed release(s) expose high-impact agent, process, network, credential, or native surfaces.")
+            relationship_review = [item for item in result["results"] if item.get("relationship_review") == "required"]
+            if relationship_review:
+                print(f"Relationship note: {len(relationship_review)} allowed release(s) declare related extensions that still need their own exact-release review.")
         print("Hash note: installed directories are version-checked but not byte-verified; use policy verify on the published VSIX before declaring compliance.")
     return 0 if result["summary"]["compliant"] else 1
 

@@ -194,6 +194,11 @@ not the original Marketplace VSIX. Such an installation is reported as
 version-allowed but unverified, and the policy check is not compliant until
 `policy verify` hashes the published artifact. Unknown versions fail closed
 because the policy default is DENY.
+
+An allowed parent extension does not approve its declared extension packs or
+dependencies. When a workspace reports incomplete relationship evidence,
+`policy check` calls it out as a separate review requirement. Each related
+release needs its own approved version and published-artifact hash.
 """,
     "automation": """# Automation
 
