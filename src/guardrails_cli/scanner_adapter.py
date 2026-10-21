@@ -184,6 +184,9 @@ def get_rules() -> dict[str, Any]:
 
 
 def engine_identity() -> dict[str, str]:
+    source = _engine_manifest()
+    revision = str(source.get("source_revision") or "")
+    pinned_build = revision if re.fullmatch(r"[0-9a-f]{40}", revision) else "unknown"
     package = None
     for distribution_name in ("guardlens", "ide-scanner"):
         try:
@@ -192,15 +195,12 @@ def engine_identity() -> dict[str, str]:
         except PackageNotFoundError:
             continue
     if package is None:
-        return {"version": "unknown", "build": "unknown"}
+        # Source checkouts do not always have distribution metadata, but the
+        # bundled engine remains identified by its verified pinned revision.
+        return {"version": "unknown", "build": pinned_build}
     build = f"pypi:{package.version}"
-    try:
-        source = _engine_manifest()
-        revision = str(source.get("source_revision") or "")
-        if re.fullmatch(r"[0-9a-f]{40}", revision):
-            build = revision
-    except (OSError, json.JSONDecodeError, TypeError):
-        pass
+    if pinned_build != "unknown":
+        build = pinned_build
     direct_url = package.read_text("direct_url.json")
     if direct_url and build.startswith("pypi:"):
         try:

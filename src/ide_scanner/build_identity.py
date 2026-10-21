@@ -51,21 +51,29 @@ def _resolve_git_head(package_root: Path) -> str:
         if not ref or any(part in {"", ".", ".."} for part in ref.split("/")):
             return "unknown"
 
-        try:
-            loose = (git_dir / ref).read_text(encoding="ascii").strip()
-        except FileNotFoundError:
-            loose = ""
-        if GIT_SHA_RE.fullmatch(loose):
-            return loose.lower()
+        ref_roots = [git_dir]
+        commondir = git_dir / "commondir"
+        if commondir.is_file():
+            common_target = commondir.read_text(encoding="ascii").strip()
+            if common_target:
+                common_root = Path(common_target)
+                ref_roots.append((git_dir / common_root).resolve() if not common_root.is_absolute() else common_root)
+        for ref_root in ref_roots:
+            try:
+                loose = (ref_root / ref).read_text(encoding="ascii").strip()
+            except FileNotFoundError:
+                loose = ""
+            if GIT_SHA_RE.fullmatch(loose):
+                return loose.lower()
 
-        packed = git_dir / "packed-refs"
-        if packed.is_file():
-            for line in packed.read_text(encoding="ascii").splitlines():
-                if line.startswith(("#", "^")):
-                    continue
-                fields = line.split(" ", 1)
-                if len(fields) == 2 and fields[1].strip() == ref and GIT_SHA_RE.fullmatch(fields[0]):
-                    return fields[0].lower()
+            packed = ref_root / "packed-refs"
+            if packed.is_file():
+                for line in packed.read_text(encoding="ascii").splitlines():
+                    if line.startswith(("#", "^")):
+                        continue
+                    fields = line.split(" ", 1)
+                    if len(fields) == 2 and fields[1].strip() == ref and GIT_SHA_RE.fullmatch(fields[0]):
+                        return fields[0].lower()
     except (OSError, UnicodeError):
         return "unknown"
     return "unknown"

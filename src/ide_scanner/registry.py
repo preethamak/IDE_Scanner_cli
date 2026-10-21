@@ -29,6 +29,14 @@ STALE_EXTENSION_DAYS = 730
 STALE_REPOSITORY_DAYS = 730
 MARKETPLACE_BATCH_SIZE = 25
 OSV_BATCH_SIZE = 100
+# OSV currently carries MAL-2025-21003 for npm's reserved `fs` security
+# holder. The exact published version is an empty package containing only a
+# README and package metadata; it is not executable malware. Keep this
+# exclusion narrow to the package, version, and advisory so genuinely
+# malicious `fs` releases (or other MAL records) remain actionable.
+OSV_KNOWN_FALSE_POSITIVE_MALWARE = {
+    ("fs", "0.0.1-security", "MAL-2025-21003"),
+}
 VSIX_ASSET_TYPE = "Microsoft.VisualStudio.Services.VSIXPackage"
 VSIX_SIGNATURE_ASSET_TYPE = "Microsoft.VisualStudio.Services.VsixSignature"
 VSIX_SHA256_PROPERTY = "Microsoft.VisualStudio.Services.VsixSha256"
@@ -195,7 +203,14 @@ def download_marketplace_vsix(
     if not target_version:
         raise MarketplaceDownloadError(f"Could not resolve a version to download for {resolved_id}.")
 
-    download_url = str(metadata.get("download_url") or "") or (
+    # The gallery query can return several platform variants with the same
+    # semantic version.  For an unqualified scan, use the exact VSIXPackage
+    # asset selected by the gallery response instead of the generic vspackage
+    # endpoint, which may resolve to a different variant than the digest in
+    # the response.  Target-platform scans intentionally keep the generic
+    # endpoint so the targetPlatform selector remains authoritative.
+    metadata_download_url = str(metadata.get("download_url") or "")
+    download_url = (metadata_download_url if metadata_download_url and not target_platform else "") or (
         f"https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{publisher}/"
         f"vsextensions/{name}/{target_version}/vspackage"
     )
@@ -578,7 +593,7 @@ def _check_osv(extension: Any) -> tuple[list[dict[str, Any]], str | None]:
 
     findings: list[dict[str, Any]] = []
     for index, result in enumerate(data.get("results", [])):
-        vulns = result.get("vulns", [])
+        vulns = _filter_osv_vulns(entries[index], result.get("vulns", []))
         if not vulns:
             continue
         dep = entries[index]
@@ -641,7 +656,7 @@ def _check_osv_many(extensions: list[Any]) -> tuple[dict[str, list[dict[str, Any
     for extension in extensions:
         extension_findings: list[dict[str, Any]] = []
         for dep in entries_by_extension.get(extension.extension_id, []):
-            vulns = vulns_by_key.get((dep["name"], dep["version"]), [])
+            vulns = _filter_osv_vulns(dep, vulns_by_key.get((dep["name"], dep["version"]), []))
             if not vulns:
                 continue
             malicious = any(str(vuln.get("id", "")).startswith("MAL-") for vuln in vulns)
@@ -662,6 +677,23 @@ def _check_osv_many(extensions: list[Any]) -> tuple[dict[str, list[dict[str, Any
         if extension_findings:
             findings_by_extension[extension.extension_id] = extension_findings
     return findings_by_extension, errors
+
+
+def _filter_osv_vulns(dep: dict[str, Any], vulns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove only explicitly documented false-positive malware records.
+
+    OSV's malicious-package feed currently labels npm's exact security-holder
+    package `fs@0.0.1-security` with MAL-2025-21003. That archive is a reserved
+    empty placeholder, so treating the advisory as extension malware creates
+    a false positive. This is intentionally an exact triple match rather than
+    a package-wide allowlist.
+    """
+    package = str(dep.get("name") or "").lower()
+    version = str(dep.get("version") or "")
+    return [
+        vuln for vuln in vulns
+        if (package, version, str(vuln.get("id") or "")) not in OSV_KNOWN_FALSE_POSITIVE_MALWARE
+    ]
 
 
 def _fetch_marketplace_metadata_many(extension_ids: list[str]) -> tuple[dict[str, dict[str, Any] | None], list[dict[str, str]]]:
@@ -832,6 +864,7 @@ def _normalize_marketplace_extension(extension_id: str, raw: dict[str, Any]) -> 
         "rating_count": int(stats.get("ratingcount") or stats.get("ratingCount") or 0),
         "registry": "vs-marketplace",
         "vsix_sha256": version_properties.get(VSIX_SHA256_PROPERTY, "").lower(),
+        "download_url": assets.get(VSIX_ASSET_TYPE, ""),
         "signature_asset_declared": VSIX_SIGNATURE_ASSET_TYPE in assets,
         "signature_asset_url": assets.get(VSIX_SIGNATURE_ASSET_TYPE, ""),
     }
