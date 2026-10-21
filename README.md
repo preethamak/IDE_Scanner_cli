@@ -38,6 +38,7 @@ guardrails scan --file extension.vsix --extension-advisories extension-advisorie
 guardrails brief --purpose "read and edit plist files" --marketplace ivhernandez.vscode-plist --marketplace mariano-g.plist-editor
 guardrails inventory --ide cursor --output team-inventory.json
 guardrails report verify report.zip
+guardrails report attest-verify report.zip --attestation report.attestation.json --require-ruleset-version 2026.10
 guardrails help
 ```
 

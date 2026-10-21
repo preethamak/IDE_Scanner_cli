@@ -154,6 +154,9 @@ def build_parser() -> argparse.ArgumentParser:
     attest_verify = report_subparsers.add_parser("attest-verify", help="Verify a report file against a digest attestation.")
     attest_verify.add_argument("path")
     attest_verify.add_argument("--attestation", required=True)
+    attest_verify.add_argument("--require-scan-id", help="Require the report to carry this scan ID.")
+    attest_verify.add_argument("--require-scanner-build", help="Require this scanner build identity.")
+    attest_verify.add_argument("--require-ruleset-version", help="Require this scanner ruleset version.")
     export = report_subparsers.add_parser("export", help="Export without recalculating scanner evidence.")
     export.add_argument("path")
     export.add_argument("--format", choices=("zip", "html", "md", "json"), required=True)
@@ -503,7 +506,18 @@ def cmd_report(args: argparse.Namespace) -> int:
     if args.report_command == "attest":
         output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True); output.write_text(json.dumps(create_attestation(args.path), indent=2, sort_keys=True) + "\n", encoding="utf-8"); print(f"Wrote digest attestation to {output}."); return 0
     if args.report_command == "attest-verify":
-        ok, message = verify_attestation(args.path, args.attestation); print(message); return 0 if ok else 1
+        required_claims = {
+            name: value
+            for name, value in {
+                "scan_id": args.require_scan_id,
+                "scanner_build": args.require_scanner_build,
+                "ruleset_version": args.require_ruleset_version,
+            }.items()
+            if value is not None
+        }
+        ok, message = verify_attestation(args.path, args.attestation, required_claims=required_claims)
+        print(message)
+        return 0 if ok else 1
     data = read_report(args.path)
     if args.format == "zip":
         if Path(args.path).suffix.lower() != ".zip":
