@@ -38,6 +38,8 @@ guardrails scan --file extension.vsix --extension-advisories extension-advisorie
 guardrails brief --purpose "read and edit plist files" --marketplace ivhernandez.vscode-plist --marketplace mariano-g.plist-editor
 guardrails inventory --ide cursor --output team-inventory.json
 guardrails report verify report.zip
+guardrails report attest-verify report.zip --attestation report.attestation.json --require-ruleset-version 2026.10
+guardrails report sbom report.zip --output guardrails.cdx.json
 guardrails help
 ```
 
@@ -49,6 +51,53 @@ VSIX identity.
 Guardrails reports the decision, risk score, malware evidence score, analysis
 coverage, provider status, and detailed findings. Reports can be exported as
 HTML, ZIP, JSON, or Markdown.
+
+## GitHub Actions
+
+Use the published GuardRails action to make an exact extension artifact review
+part of a release pipeline. It scans the supplied VSIX before installation,
+adds the decision and coverage floor to the job summary, exposes structured
+outputs, and uploads the canonical JSON evidence report even when the policy
+fails.
+
+```yaml
+- uses: preethamak/IDE_Scanner_cli@main
+  id: guardrails
+  with:
+    artifact: dist/my-extension.vsix
+    profile: standard
+    fail-on: review
+
+- run: echo "GuardRails decision: ${{ steps.guardrails.outputs.decision }}"
+```
+
+Pin a release tag or commit SHA in production. See
+[the integration guide](docs/github-actions.md) for deterministic advisory
+snapshots, output semantics, and failure handling.
+
+For GitHub Code Scanning and other SARIF consumers, export the canonical scan
+as SARIF 2.1.0. Findings retain the exact extension version and artifact hash
+as result properties; package-level observations are not mislabeled as source
+file locations.
+
+```bash
+guardrails scan --file dist/example.vsix --format sarif --output guardrails.sarif
+```
+
+## Offline report identity
+
+Create a portable SHA-256 digest record when attaching a GuardRails report to a
+release approval, ticket, or audit package. Verify the same bytes later without
+depending on the website:
+
+```bash
+guardrails report attest review-report.zip --output review-report.attestation.json
+guardrails report attest-verify review-report.zip --attestation review-report.attestation.json
+```
+
+The record includes scan, scanner-build, and ruleset metadata. It proves that a
+report file has not changed since attestation; it is not a signer identity or a
+substitute for a future signed-report workflow.
 
 ## Pre-recommendation briefs
 
