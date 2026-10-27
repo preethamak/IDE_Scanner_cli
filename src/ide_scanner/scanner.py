@@ -14,6 +14,7 @@ from concurrent.futures import ProcessPoolExecutor
 from itertools import repeat
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree as ET
 
 from .artifact_store import ArtifactStore, ArtifactStoreError, StoredArtifact, artifact_store_from_environment
 from .artifact_input import ArtifactInputError, acquire_https_vsix
@@ -217,6 +218,7 @@ CAPABILITY_RULES = {
     "credential-global-state-storage",
     "credential-inputbox-prompt",
     "dynamic-shell-execution",
+    "extension-install-surface",
     "lifecycle-script",
     "mcp-server-command",
     "native-or-packed-artifact",
@@ -236,6 +238,7 @@ POSTURE_RULES = {
     "workflow-token-permissions-broad",
     "entrypoint-ast-unparsed",
     "executable-heavy-obfuscation",
+    "malformed-extension-relationship",
 }
 REPUTATION_RULES = {
     "marketplace-extension-not-found",
@@ -610,9 +613,21 @@ def _load_registry_snapshot(path: Path | str) -> dict[str, Any]:
     return captured
 
 
-def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[str, dict[str, Any]] | None = None) -> ExtensionReport:
+def scan_extension(
+    path: Path,
+    source: str = "vscode",
+    known_bad_hashes: dict[str, dict[str, Any]] | None = None,
+    *,
+    manifest_override: dict[str, Any] | None = None,
+    manifest_format: str = "vscode-package-json",
+    manifest_path: str = "package.json",
+) -> ExtensionReport:
     _enforce_extension_resource_budget(path)
-    manifest, manifest_status = _read_manifest_status(path / "package.json")
+    if manifest_override is None:
+        manifest, manifest_status = _read_manifest_status(path / "package.json")
+    else:
+        manifest = dict(manifest_override)
+        manifest_status = "valid"
     name = str(manifest.get("name") or path.name)
     publisher = str(manifest.get("publisher") or "unknown")
     version = str(manifest.get("version") or "0.0.0")
@@ -626,12 +641,29 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
     ast_unparsed_entrypoints: list[str] = []
 
     _add_manifest_findings(extension_id, version, manifest, findings, capabilities)
+    extension_relationships = _extension_relationship_inventory(manifest)
+    _add_extension_relationship_findings(
+        extension_id,
+        version,
+        extension_relationships,
+        findings,
+        capabilities,
+    )
     _add_dependency_source_findings(extension_id, version, manifest, findings)
 
     files = _walk_extension_files(path)
     entrypoints, optional_missing_entrypoints = _declared_entrypoints(manifest, path)
     artifact_inventory = _artifact_inventory(path, files)
-    analysis_coverage = _new_analysis_coverage(files, entrypoints, path, optional_missing_entrypoints)
+    artifact_inventory["package_format"] = manifest_format
+    artifact_inventory["package_manifest_path"] = manifest_path
+    artifact_inventory["extension_relationship_inventory"] = extension_relationships
+    analysis_coverage = _new_analysis_coverage(
+        files,
+        entrypoints,
+        path,
+        optional_missing_entrypoints,
+        artifact_format=manifest_format,
+    )
     _add_artifact_inventory_findings(extension_id, version, artifact_inventory, known_bad_hashes or {}, findings, capabilities, path)
     _add_repository_posture_findings(extension_id, version, manifest, path, findings, artifact_inventory)
 
@@ -722,12 +754,15 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
                 })
             else:
                 analysis_coverage["provider_scopes"]["semgrep"]["eligible_files"].append(rel)
-            ast_budget_allows_entrypoint = (
-                not is_entrypoint
-                or not generated_blob
-                or text_size <= GENERATED_ENTRYPOINT_AST_MAX_BYTES
-            )
-            if ast_budget_allows_entrypoint:
+            # Generated bundles are still covered by bounded raw-text, YARA,
+            # and capability analysis, but their AST trees can amplify memory
+            # by tens of times. Keep the AST resource bound for every generated
+            # blob, not only declared entrypoints; otherwise a large helper
+            # bundle can make an otherwise valid scan incomplete. Declared
+            # entrypoints that are skipped receive an explicit posture finding
+            # below so this remains disclosed rather than silently trusted.
+            ast_budget_allows = not generated_blob or text_size <= GENERATED_ENTRYPOINT_AST_MAX_BYTES
+            if ast_budget_allows:
                 status = _add_ast_findings(extension_id, version, rel, text, findings, generated=generated_blob)
                 js_ast_statuses.append(status)
                 if status not in ("ok", "unparsed"):
@@ -736,6 +771,8 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
                     ast_unparsed_entrypoints.append(rel)
             else:
                 js_ast_statuses.append("generated-resource-skipped")
+                if is_entrypoint:
+                    ast_unparsed_entrypoints.append(rel)
                 js_ast_failed_paths.append(rel)
         if suffix in EXEC_TEXT_EXTS:
             analysis_coverage["analyzed_executable_files"].append(rel)
@@ -835,12 +872,13 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
 
     if ast_unparsed_entrypoints:
         # A declared activation entrypoint whose source the AST layer cannot
-        # parse (TypeScript/JSX shipped un-transpiled, or genuinely malformed
-        # JS) loses structural evasion detection for that file. The raw-text
-        # rule layer still covers it, so the provider stays "completed" -- but
-        # a silent pass here would let the primary code path skate on
-        # regex-only coverage. Surface it as a posture-class review nudge so
-        # the extension cannot reach "allow" without a human confirming the
+        # parse (TypeScript/JSX shipped un-transpiled, genuinely malformed JS,
+        # or a generated bundle beyond the bounded AST budget) loses
+        # structural evasion detection for that file. The raw-text rule layer
+        # still covers it, so the provider stays "completed" -- but a silent
+        # pass here would let the primary code path skate on regex-only
+        # coverage. Surface it as a posture-class review nudge so the
+        # extension cannot reach "allow" without a human confirming the
         # entrypoint is benign.
         listed = ", ".join(sorted(ast_unparsed_entrypoints)[:5])
         findings.append(_finding(
@@ -850,10 +888,10 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
             "code",
             "LOW",
             _SEVERITY_TO_CONFIDENCE["LOW"],
-            f"Declared entrypoint(s) could not be parsed by the AST layer (plain-JS only): {listed}. "
-            "Structural obfuscation detection did not run on this file; only raw-text rules applied.",
+            f"Declared entrypoint(s) were not fully covered by the AST layer (plain-JS parser or resource budget): {listed}. "
+            "Structural obfuscation detection did not run on this file; bounded raw-text rules still applied.",
             sorted(ast_unparsed_entrypoints)[:5],
-            "Confirm the entrypoint is benign; AST-level evasion checks did not cover it because acorn parses plain JavaScript only.",
+            "Confirm the entrypoint is benign; AST-level evasion checks did not fully cover it because the source was not parseable or exceeded the generated-code budget.",
             evidence={"unparsed_entrypoints": sorted(ast_unparsed_entrypoints)},
         ))
 
@@ -884,6 +922,8 @@ def scan_extension(path: Path, source: str = "vscode", known_bad_hashes: dict[st
     analysis_coverage["manifest_validation"] = {
         "status": manifest_status,
         "valid": manifest_status == "valid",
+        "format": manifest_format,
+        "path": manifest_path,
     }
     if manifest_status != "valid":
         analysis_coverage.setdefault("read_failures", [])
@@ -939,6 +979,9 @@ def scan_vsix(
     path: Path,
     known_bad_hashes: dict[str, dict[str, Any]] | None = None,
     artifact_origin: str = "user_uploaded_vsix",
+    *,
+    expected_extension_id: str | None = None,
+    expected_version: str | None = None,
 ) -> ExtensionReport:
     if artifact_origin not in ARTIFACT_ORIGINS:
         raise ValueError(f"Unsupported VSIX artifact origin: {artifact_origin}")
@@ -957,7 +1000,23 @@ def scan_vsix(
             tmp_root = Path(tmp)
             archive_anomalies = _safe_extract_vsix(vsix_path, tmp_root)
             extension_root = _find_extracted_extension_root(tmp_root)
-            report = scan_extension(extension_root, source="vsix", known_bad_hashes=known_bad_hashes)
+            visual_studio_manifest = _find_visual_studio_manifest(extension_root)
+            if visual_studio_manifest is not None:
+                manifest, manifest_path = _visual_studio_package_manifest(
+                    visual_studio_manifest,
+                    expected_extension_id=expected_extension_id,
+                    expected_version=expected_version,
+                )
+                report = scan_extension(
+                    extension_root,
+                    source="vsix",
+                    known_bad_hashes=known_bad_hashes,
+                    manifest_override=manifest,
+                    manifest_format="visual-studio-vsix",
+                    manifest_path=manifest_path,
+                )
+            else:
+                report = scan_extension(extension_root, source="vsix", known_bad_hashes=known_bad_hashes)
             report.install_path = str(original_path)
             report.source = "vsix"
             report.artifact_hash = vsix_hash
@@ -1128,6 +1187,13 @@ def _runtime_required_for_report(report: ExtensionReport) -> bool:
     based rather than name based: a theme carrying a hidden native payload or
     network/process behavior still enters the required runtime path.
     """
+    coverage = report.analysis_coverage if isinstance(report.analysis_coverage, dict) else {}
+    if coverage.get("artifact_format") == "visual-studio-vsix":
+        # Visual Studio extensions are .NET/VS extensibility packages, not
+        # VS Code Node extensions. The static package providers still inspect
+        # every extracted byte, but the VS Code sandbox cannot execute their
+        # managed entrypoints safely or meaningfully.
+        return False
     capability_ids = {
         str(item.get("id") or "")
         for item in report.capabilities
@@ -1135,7 +1201,6 @@ def _runtime_required_for_report(report: ExtensionReport) -> bool:
     }
     if capability_ids & _DYNAMIC_RUNTIME_CAPABILITIES:
         return True
-    coverage = report.analysis_coverage if isinstance(report.analysis_coverage, dict) else {}
     return bool(coverage.get("resolved_entrypoints"))
 
 
@@ -1367,7 +1432,13 @@ def scan_marketplace_extension(
                 target_platform=registry_source.get("target_platform", target_platform or ""),
             )
             scan_path = stored.path
-        report = scan_vsix(scan_path, known_bad_hashes=known_bad_hashes, artifact_origin="archive_artifact")
+        report = scan_vsix(
+            scan_path,
+            known_bad_hashes=known_bad_hashes,
+            artifact_origin="archive_artifact",
+            expected_extension_id=registry_source.get("extension_id", resolved_id),
+            expected_version=registry_source.get("version", version or "") or version,
+        )
         if dynamic_runtime and runtime_bundle is not None:
             runtime_required = _runtime_required_for_report(report)
             instance_key = _runtime_instance_key(report)
@@ -1736,6 +1807,98 @@ def _add_manifest_findings(
             capabilities.setdefault("agentic", {"id": "agentic", "evidence": []})["evidence"].append(key)
             _add_agent_capability_findings(extension_id, version, key, contributes.get(key), findings, capabilities)
     _add_cross_extension_manifest_findings(extension_id, version, contributes, findings, capabilities)
+
+
+def _extension_relationship_inventory(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Capture extension packages that the published manifest can pull in."""
+    entries: list[dict[str, str]] = []
+    invalid_entries: list[dict[str, str]] = []
+    for field, relationship in (
+        ("extensionPack", "extension_pack"),
+        ("extensionDependencies", "extension_dependency"),
+    ):
+        value = manifest.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            invalid_entries.append({"field": field, "value": _manifest_value_summary(value), "reason": "expected an array"})
+            continue
+        for item in value:
+            if not isinstance(item, str):
+                invalid_entries.append({"field": field, "value": _manifest_value_summary(item), "reason": "expected an extension identifier string"})
+                continue
+            extension_id = item.strip()
+            if not _is_extension_identifier(extension_id):
+                invalid_entries.append({"field": field, "value": _manifest_value_summary(item), "reason": "invalid extension identifier"})
+                continue
+            entries.append({
+                "extension_id": extension_id.casefold(),
+                "relationship": relationship,
+                "declared_in": field,
+            })
+
+    unique_entries = {(item["relationship"], item["extension_id"]): item for item in entries}
+    return {
+        "entries": sorted(unique_entries.values(), key=lambda item: (item["relationship"], item["extension_id"])),
+        "invalid_entries": invalid_entries,
+    }
+
+
+def _add_extension_relationship_findings(
+    extension_id: str,
+    version: str,
+    inventory: dict[str, Any],
+    findings: list[Finding],
+    capabilities: dict[str, dict[str, Any]],
+) -> None:
+    entries = inventory.get("entries") if isinstance(inventory.get("entries"), list) else []
+    invalid_entries = inventory.get("invalid_entries") if isinstance(inventory.get("invalid_entries"), list) else []
+    if entries:
+        identifiers = [str(item["extension_id"]) for item in entries if isinstance(item, dict) and isinstance(item.get("extension_id"), str)]
+        capabilities["extension_install_surface"] = {
+            "id": "extension_install_surface",
+            "evidence": identifiers,
+        }
+        findings.append(_finding(
+            extension_id,
+            version,
+            "extension-install-surface",
+            "supply-chain",
+            "LOW",
+            0.58,
+            "Manifest declares additional extension packages that can expand the installed capability surface.",
+            ["package.json"],
+            "Review each declared extension package at its intended version; this artifact scan does not imply that related packages were scanned.",
+            {"relationships": entries},
+        ))
+    if invalid_entries:
+        findings.append(_finding(
+            extension_id,
+            version,
+            "malformed-extension-relationship",
+            "supply-chain",
+            "MEDIUM",
+            0.76,
+            "Manifest contains malformed extensionPack or extensionDependencies declarations.",
+            ["package.json"],
+            "Do not treat the extension install surface as complete until the manifest declarations are corrected and the referenced packages are reviewed.",
+            {"invalid_relationships": invalid_entries},
+        ))
+
+
+def _is_extension_identifier(value: str) -> bool:
+    if not value or any(character.isspace() for character in value):
+        return False
+    publisher, separator, name = value.partition(".")
+    return bool(separator and publisher and name and "." not in publisher)
+
+
+def _manifest_value_summary(value: Any) -> str:
+    if isinstance(value, str):
+        return value[:200]
+    if value is None:
+        return "null"
+    return type(value).__name__
 
 
 def _add_dependency_source_findings(
@@ -4948,6 +5111,9 @@ def _record_archive_anomalies(report: "ExtensionReport", anomalies: dict[str, li
     report.artifact_inventory["skipped_reason"] = "; ".join(limitations)
 
 
+VISUAL_STUDIO_MANIFEST_MAX_BYTES = 2 * 1024 * 1024
+
+
 def _find_extracted_extension_root(root: Path) -> Path:
     preferred = root / "extension" / "package.json"
     if preferred.exists():
@@ -4956,7 +5122,98 @@ def _find_extracted_extension_root(root: Path) -> Path:
         if "node_modules" in package_json.parts:
             continue
         return package_json.parent
-    raise ValueError("VSIX did not contain an extension package.json")
+    visual_studio_manifest = _find_visual_studio_manifest(root)
+    if visual_studio_manifest is not None:
+        return visual_studio_manifest.parent
+    raise ValueError("VSIX did not contain a supported package manifest")
+
+
+def _find_visual_studio_manifest(root: Path) -> Path | None:
+    candidates = sorted(
+        (
+            item
+            for item in root.rglob("*")
+            if item.is_file() and item.name.casefold() == "extension.vsixmanifest"
+        ),
+        key=lambda item: (len(item.relative_to(root).parts), item.relative_to(root).as_posix().casefold()),
+    )
+    return candidates[0] if candidates else None
+
+
+def _visual_studio_xml_children(element: ET.Element, name: str) -> list[ET.Element]:
+    return [child for child in list(element) if child.tag.rsplit("}", 1)[-1] == name]
+
+
+def _visual_studio_xml_text(element: ET.Element, name: str) -> str:
+    for child in element.iter():
+        if child is element:
+            continue
+        if child.tag.rsplit("}", 1)[-1] == name:
+            return (child.text or "").strip()
+    return ""
+
+
+def _visual_studio_package_manifest(
+    path: Path,
+    *,
+    expected_extension_id: str | None = None,
+    expected_version: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"Visual Studio extension manifest could not be read: {exc}") from exc
+    if len(raw) > VISUAL_STUDIO_MANIFEST_MAX_BYTES:
+        raise ValueError("Visual Studio extension manifest exceeds the parser size limit")
+    try:
+        document = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise ValueError(f"Visual Studio extension manifest is invalid XML: {exc}") from exc
+
+    metadata_nodes = [node for node in document.iter() if node.tag.rsplit("}", 1)[-1] == "Metadata"]
+    metadata = metadata_nodes[0] if metadata_nodes else document
+    identity_nodes = _visual_studio_xml_children(metadata, "Identity")
+    identity = identity_nodes[0] if identity_nodes else next(
+        (node for node in document.iter() if node.tag.rsplit("}", 1)[-1] == "Identity"),
+        None,
+    )
+    if identity is None:
+        raise ValueError("Visual Studio extension manifest does not declare an Identity")
+
+    manifest_publisher = str(identity.attrib.get("Publisher") or "").strip()
+    manifest_version = str(identity.attrib.get("Version") or "").strip()
+    manifest_identity = str(identity.attrib.get("Id") or "").strip()
+    if not manifest_version:
+        raise ValueError("Visual Studio extension manifest does not declare a version")
+    if expected_version and str(expected_version).strip() != manifest_version:
+        raise ValueError(
+            "Visual Studio extension manifest version does not match the requested Marketplace version: "
+            f"{manifest_version} != {str(expected_version).strip()}"
+        )
+
+    display_name = _visual_studio_xml_text(metadata, "DisplayName") or manifest_identity or path.parent.name
+    description = _visual_studio_xml_text(metadata, "Description")
+    canonical_version = manifest_version
+    canonical_id = str(expected_extension_id or "").strip()
+    if canonical_id:
+        parts = canonical_id.split(".", 1)
+        if len(parts) != 2 or not all(part.strip() for part in parts):
+            raise ValueError(f"Marketplace extension identity is invalid: {canonical_id}")
+        publisher, name = (part.strip() for part in parts)
+    else:
+        publisher = re.sub(r"[^A-Za-z0-9_-]+", "", manifest_publisher) or "visualstudio"
+        name = re.sub(r"[^A-Za-z0-9_-]+", "", manifest_identity.split(".", 1)[0]) or "extension"
+
+    return {
+        "publisher": publisher,
+        "name": name,
+        "version": canonical_version,
+        "displayName": display_name,
+        "description": description,
+        "_ide_scanner_package_format": "visual-studio-vsix",
+        "_ide_scanner_manifest_identity": manifest_identity,
+        "_ide_scanner_manifest_publisher": manifest_publisher,
+    }, path.name
 
 
 def _apply_vsix_known_bad_match(report: ExtensionReport, known_bad_hashes: dict[str, dict[str, Any]]) -> None:
@@ -5088,6 +5345,8 @@ def _new_analysis_coverage(
     entrypoints: set[str],
     path: Path,
     optional_missing_entrypoints: list[str] | None = None,
+    *,
+    artifact_format: str = "vscode-package-json",
 ) -> dict[str, Any]:
     all_paths = {file.relative_to(path).as_posix() for file in files}
     candidates = sorted(
@@ -5105,6 +5364,8 @@ def _new_analysis_coverage(
         and _is_ignored_static_asset(rel)
     )
     return {
+        "artifact_format": artifact_format,
+        "execution_scope": "static-package" if artifact_format == "visual-studio-vsix" else "static-and-runtime-capable",
         "status": "pending",
         "coverage_percent": 0,
         "discovered_files": len(files),
@@ -5417,11 +5678,13 @@ def _read_manifest(path: Path) -> dict[str, Any]:
 def _javascript_ast_provider_status(statuses: list[str], failed_paths: list[str] | None = None) -> dict[str, Any]:
     """Summarize per-file JS/TS AST walker statuses into a provider record.
 
-    ``completed`` only when every analyzed file's walker ran successfully. A
-    missing Node runtime, timeout, spawn error, or malformed walker output on
-    any file marks the provider ``failed`` (required), so coverage finalization
-    records a limitation and the scan cannot report ``complete``/``allow`` on
-    the strength of AST analysis that never actually ran.
+    ``completed`` when every eligible source file's walker ran successfully,
+    or when a generated bundle was explicitly skipped by the bounded AST
+    budget. A missing Node runtime, timeout, spawn error, malformed walker
+    output, or oversized non-generated source marks the provider ``failed``
+    (required), so coverage finalization records a limitation and the scan
+    cannot report ``complete``/``allow`` on the strength of AST analysis that
+    never actually ran.
 
     ``unparsed`` files (TypeScript/JSX or syntactically invalid source that the
     plain-JS vendored parser cannot read) are a disclosed tool limitation, not
@@ -5452,12 +5715,17 @@ def _javascript_ast_provider_status(statuses: list[str], failed_paths: list[str]
         record["status"] = "completed"
         record["analyzed_files"] = 0
         return record
-    hard_failures = [s for s in statuses if s not in ("ok", "unparsed")]
+    hard_failures = [s for s in statuses if s not in ("ok", "unparsed", "generated-resource-skipped")]
     unparsed = [s for s in statuses if s == "unparsed"]
+    generated_skipped = [s for s in statuses if s == "generated-resource-skipped"]
     record["analyzed_files"] = len(statuses)
     record["failed_files"] = len(hard_failures)
     if unparsed:
         record["unparsed_files"] = len(unparsed)
+    if generated_skipped:
+        record["skipped_files"] = len(generated_skipped)
+        if failed_paths:
+            record["skipped_paths"] = sorted(set(failed_paths))
     if hard_failures:
         reasons = sorted(set(hard_failures))
         record["status"] = "failed"
@@ -5466,24 +5734,25 @@ def _javascript_ast_provider_status(statuses: list[str], failed_paths: list[str]
             record["failed_paths"] = sorted(set(failed_paths))
         if "node-missing" in reasons:
             record["error"] = "Node runtime unavailable; JavaScript AST analysis did not run."
-        elif "generated-resource-skipped" in reasons:
-            record["error"] = (
-                "AST analysis skipped generated entrypoints beyond the "
-                f"{GENERATED_ENTRYPOINT_AST_MAX_BYTES:,}-byte generated-code budget; "
-                "bounded raw-text and YARA analysis still ran."
-            )
         elif "resource-skipped" in reasons:
             record["error"] = (
                 f"AST analysis skipped files beyond the {JS_AST_MAX_INPUT_BYTES:,}-byte "
                 "per-file memory-safety limit; bounded raw-text and YARA analysis still ran."
             )
-    elif unparsed:
+    elif unparsed or generated_skipped:
         record["status"] = "completed"
-        record["note"] = (
-            f"AST analysis skipped {len(unparsed)} file(s) the plain-JS parser "
-            "could not read (TypeScript/JSX or invalid syntax); raw-text rules "
-            "still applied."
-        )
+        notes: list[str] = []
+        if unparsed:
+            notes.append(
+                f"AST analysis skipped {len(unparsed)} file(s) the plain-JS parser "
+                "could not read (TypeScript/JSX or invalid syntax)"
+            )
+        if generated_skipped:
+            notes.append(
+                f"AST analysis skipped {len(generated_skipped)} generated file(s) "
+                f"beyond the {GENERATED_ENTRYPOINT_AST_MAX_BYTES:,}-byte budget"
+            )
+        record["note"] = "; ".join(notes) + "; bounded raw-text and YARA rules still applied."
     else:
         record["status"] = "completed"
     return record

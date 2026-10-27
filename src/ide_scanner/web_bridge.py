@@ -9,6 +9,7 @@ from typing import Any
 
 from .cli import _run_benchmark
 from .core import ScanRequest, build_inventory, run_scan, summarize_report
+from .mcp import scan_mcp_path, scan_mcp_payload
 from .registry import search_marketplace_extensions
 from .rule_registry import rules_json
 from .sandbox_runner import run_sandbox
@@ -23,6 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser("sandbox")
     subparsers.add_parser("search")
     subparsers.add_parser("rules")
+    subparsers.add_parser("mcp_scan")
     args = parser.parse_args(argv)
 
     if args.command == "inventory":
@@ -87,6 +89,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "rules":
         _emit(rules_json())
+        return 0
+    if args.command == "mcp_scan":
+        payload = _read_stdin_json()
+        path = payload.get("path")
+        if isinstance(path, str) and path.strip():
+            _emit(scan_mcp_path(path))
+            return 0
+        _emit(scan_mcp_payload(payload))
         return 0
     return 2
 

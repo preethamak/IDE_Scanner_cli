@@ -1513,6 +1513,11 @@ function createVscodeStub() {
   });
 }
 
+// Native ESM imports resolve through the synthetic package bridge prepared
+// beside the artifact. Give that bridge the exact same host object used by
+// CommonJS interception instead of maintaining a second API surface.
+global.__guardrailsVscodeStub = createVscodeStub();
+
 record({kind: 'instrumentation_started', home: sandboxHome});
 """.strip()
         + "\n",
@@ -1975,15 +1980,101 @@ def _prepare_target(source: Path, destination: Path) -> Path:
                         dst.write(chunk)
         preferred = destination / "extension" / "package.json"
         if preferred.exists():
-            return preferred.parent
+            target = preferred.parent
+            _ensure_vscode_esm_bridge(target)
+            return target
         for package_json in destination.rglob("package.json"):
             if "node_modules" not in package_json.parts:
-                return package_json.parent
+                target = package_json.parent
+                _ensure_vscode_esm_bridge(target)
+                return target
     if source.is_dir():
         _validate_source_tree(source)
         shutil.copytree(source, destination, symlinks=True)
+        _ensure_vscode_esm_bridge(destination)
         return destination
     raise ValueError("Sandbox target must be an extension directory or VSIX file")
+
+
+def _ensure_vscode_esm_bridge(target: Path) -> None:
+    """Expose the same inert VS Code host to native ESM entrypoints.
+
+    CommonJS extensions are intercepted by the Node require hook above. Native
+    ESM imports resolve through Node's package resolver instead, where the
+    editor-provided ``vscode`` module is normally absent from a VSIX. Without
+    this bridge a safe extension can fail before activation and be reported as
+    missing runtime coverage. Never replace a package shipped by the artifact.
+    """
+    package_dir = target / "node_modules" / "vscode"
+    if (package_dir / "package.json").exists():
+        return
+    package_dir.mkdir(parents=True, exist_ok=True)
+    (package_dir / "package.json").write_text(
+        json.dumps({
+            "name": "vscode",
+            "version": "1.99.0",
+            "main": "index.cjs",
+            "type": "commonjs",
+        }),
+        encoding="utf-8",
+    )
+    (package_dir / "index.cjs").write_text(
+        """const stub = global.__guardrailsVscodeStub || {};
+// Keep these assignments static so Node exposes named exports to native ESM.
+exports.__esModule = false;
+exports.version = stub.version;
+exports.commands = stub.commands;
+exports.debug = stub.debug;
+exports.tasks = stub.tasks;
+exports.lm = stub.lm;
+exports.window = stub.window;
+exports.workspace = stub.workspace;
+exports.env = stub.env;
+exports.extensions = stub.extensions;
+exports.l10n = stub.l10n;
+exports.ConfigurationTarget = stub.ConfigurationTarget;
+exports.FileSystemError = stub.FileSystemError;
+exports.languages = stub.languages;
+exports.tests = stub.tests;
+exports.Uri = stub.Uri;
+exports.RelativePattern = stub.RelativePattern;
+exports.ExtensionContext = stub.ExtensionContext;
+exports.Disposable = stub.Disposable;
+exports.EventEmitter = stub.EventEmitter;
+exports.CompletionItem = stub.CompletionItem;
+exports.CodeAction = stub.CodeAction;
+exports.CodeLens = stub.CodeLens;
+exports.DocumentLink = stub.DocumentLink;
+exports.Diagnostic = stub.Diagnostic;
+exports.TreeItem = stub.TreeItem;
+exports.ThemeIcon = stub.ThemeIcon;
+exports.ThemeColor = stub.ThemeColor;
+exports.MarkdownString = stub.MarkdownString;
+exports.TreeItemCollapsibleState = stub.TreeItemCollapsibleState;
+exports.TaskScope = stub.TaskScope;
+exports.TaskGroup = stub.TaskGroup;
+exports.ViewColumn = stub.ViewColumn;
+exports.CompletionItemKind = stub.CompletionItemKind;
+exports.SymbolKind = stub.SymbolKind;
+exports.DiagnosticSeverity = stub.DiagnosticSeverity;
+exports.FileType = stub.FileType;
+exports.MarkupKind = stub.MarkupKind;
+exports.FoldingRangeKind = stub.FoldingRangeKind;
+exports.SemanticTokenTypes = stub.SemanticTokenTypes;
+exports.UIKind = stub.UIKind;
+exports.OverviewRulerLane = stub.OverviewRulerLane;
+exports.ColorThemeKind = stub.ColorThemeKind;
+exports.LogLevel = stub.LogLevel;
+exports.TestRunProfileKind = stub.TestRunProfileKind;
+exports.TestTag = stub.TestTag;
+exports.TestMessage = stub.TestMessage;
+exports.CodeActionKind = stub.CodeActionKind;
+exports.IndentAction = stub.IndentAction;
+exports.TextEditorRevealType = stub.TextEditorRevealType;
+exports.default = stub;
+""",
+        encoding="utf-8",
+    )
 
 
 def _validate_source_tree(source: Path) -> None:

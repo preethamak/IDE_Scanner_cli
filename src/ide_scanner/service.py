@@ -18,6 +18,7 @@ from typing import Any, Callable
 from .artifact_store import TARGET_PLATFORM_RE
 from .report_bundle import build_report_bundle
 from .rule_registry import RULESET_VERSION, rules_json
+from .mcp import scan_mcp_payload
 from .scanner import scan_targets
 
 SERVICE_VERSION = "0.1.0"
@@ -39,6 +40,7 @@ def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int
 MAX_SCAN_WORKERS = _bounded_env_int("IDE_SCANNER_MAX_WORKERS", 2, 1, 16)
 MAX_SCAN_QUEUE = _bounded_env_int("IDE_SCANNER_MAX_QUEUE", 32, 1, 1024)
 JOB_TIMEOUT_SECONDS = _bounded_env_int("IDE_SCANNER_JOB_TIMEOUT", 600, 30, 3600)
+MCP_REQUEST_MAX_BYTES = _bounded_env_int("IDE_SCANNER_MCP_MAX_BYTES", 512 * 1024, 16 * 1024, 2 * 1024 * 1024)
 
 
 class JobStore:
@@ -323,7 +325,18 @@ class ScannerServiceHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._json(401, {"error": "Scanner service authorization failed."})
             return
-        if self.path.split("?", 1)[0] != "/v1/scans/marketplace":
+        path = self.path.split("?", 1)[0]
+        if path == "/v1/scans/mcp":
+            payload = self._read_json(max_bytes=MCP_REQUEST_MAX_BYTES)
+            if not payload:
+                self._json(400, {"error": "MCP assessment input must be a JSON object."})
+                return
+            try:
+                self._json(200, scan_mcp_payload(payload))
+            except Exception as exc:  # noqa: BLE001 - service returns bounded client-safe errors
+                self._json(422, {"error": str(exc) or "MCP assessment failed."})
+            return
+        if path != "/v1/scans/marketplace":
             self._json(404, {"error": "Route not found."})
             return
         payload = self._read_json()
@@ -350,9 +363,12 @@ class ScannerServiceHandler(BaseHTTPRequestHandler):
         if os.environ.get("IDE_SCANNER_QUIET") != "1":
             super().log_message(format, *args)
 
-    def _read_json(self) -> dict[str, Any]:
+    def _read_json(self, *, max_bytes: int = 16_384) -> dict[str, Any]:
         try:
-            length = min(int(self.headers.get("content-length", "0")), 16_384)
+            content_length = int(self.headers.get("content-length", "0"))
+            if content_length <= 0 or content_length > max_bytes:
+                return {}
+            length = min(content_length, max_bytes)
             value = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
             return {}
