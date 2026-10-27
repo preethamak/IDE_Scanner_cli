@@ -1,0 +1,128 @@
+name: GuardRails extension review
+description: Scan an exact VSIX artifact in GitHub Actions and retain decision evidence.
+author: Abscissa
+inputs:
+  artifact:
+    description: Path to the VSIX, ZIP, or unpacked extension artifact to review.
+    required: true
+  profile:
+    description: GuardRails analysis profile. Use standard for static CI analysis.
+    required: false
+    default: standard
+  fail-on:
+    description: Fail the job at block, review, or never.
+    required: false
+    default: block
+  online:
+    description: Enable online dependency and registry intelligence for local artifacts.
+    required: false
+    default: "false"
+  extension-advisories:
+    description: Optional pinned GuardRails advisory snapshot for deterministic CI.
+    required: false
+    default: ""
+  registry-snapshot:
+    description: Optional pinned registry intelligence snapshot for deterministic CI.
+    required: false
+    default: ""
+  report-path:
+    description: Path for the canonical JSON report.
+    required: false
+    default: guardrails-report.json
+  upload-report:
+    description: Upload the canonical JSON report as a workflow artifact, including on policy failure.
+    required: false
+    default: "true"
+  sbom-path:
+    description: Path for the CycloneDX 1.5 SBOM projected from the completed report.
+    required: false
+    default: guardrails-sbom.cdx.json
+  upload-sbom:
+    description: Generate and upload the CycloneDX SBOM when a canonical report is available.
+    required: false
+    default: "true"
+outputs:
+  decision:
+    description: Worst GuardRails decision from the report.
+    value: ${{ steps.publish.outputs.decision }}
+  extension-count:
+    description: Number of extensions represented in the report.
+    value: ${{ steps.publish.outputs.extension-count }}
+  coverage-percent:
+    description: Lowest reported analysis coverage percentage.
+    value: ${{ steps.publish.outputs.coverage-percent }}
+  complete:
+    description: Whether all reported analysis completed.
+    value: ${{ steps.publish.outputs.complete }}
+  report-valid:
+    description: Whether the generated JSON report could be parsed.
+    value: ${{ steps.publish.outputs.report-valid }}
+  sbom-valid:
+    description: Whether a CycloneDX SBOM was generated from the canonical report.
+    value: ${{ steps.sbom.outputs.sbom-valid }}
+runs:
+  using: composite
+  steps:
+    - name: Install GuardRails
+      shell: bash
+      run: python -m pip install --disable-pip-version-check --no-input "$GITHUB_ACTION_PATH"
+    - name: Scan published extension artifact
+      id: scan
+      shell: bash
+      continue-on-error: true
+      env:
+        INPUT_ARTIFACT: ${{ inputs.artifact }}
+        INPUT_PROFILE: ${{ inputs.profile }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_ONLINE: ${{ inputs.online }}
+        INPUT_EXTENSION_ADVISORIES: ${{ inputs.extension-advisories }}
+        INPUT_REGISTRY_SNAPSHOT: ${{ inputs.registry-snapshot }}
+        INPUT_REPORT_PATH: ${{ inputs.report-path }}
+      run: |
+        args=(scan --file "$INPUT_ARTIFACT" --profile "$INPUT_PROFILE" --fail-on "$INPUT_FAIL_ON" --format json --output "$INPUT_REPORT_PATH")
+        if [[ "$INPUT_ONLINE" == "true" ]]; then args+=(--online); fi
+        if [[ -n "$INPUT_EXTENSION_ADVISORIES" ]]; then args+=(--extension-advisories "$INPUT_EXTENSION_ADVISORIES"); fi
+        if [[ -n "$INPUT_REGISTRY_SNAPSHOT" ]]; then args+=(--registry-snapshot "$INPUT_REGISTRY_SNAPSHOT"); fi
+        guardrails "${args[@]}"
+    - name: Publish GuardRails result
+      id: publish
+      if: always()
+      shell: bash
+      env:
+        INPUT_REPORT_PATH: ${{ inputs.report-path }}
+        SCAN_EXIT_CODE: ${{ steps.scan.outcome == 'success' && '0' || '1' }}
+      run: python "$GITHUB_ACTION_PATH/scripts/github_action_result.py" --report "$INPUT_REPORT_PATH" --scan-exit-code "$SCAN_EXIT_CODE"
+    - name: Generate CycloneDX SBOM
+      id: sbom
+      if: ${{ always() && inputs.upload-sbom == 'true' }}
+      shell: bash
+      env:
+        INPUT_REPORT_PATH: ${{ inputs.report-path }}
+        INPUT_SBOM_PATH: ${{ inputs.sbom-path }}
+      run: |
+        if guardrails report sbom "$INPUT_REPORT_PATH" --output "$INPUT_SBOM_PATH"; then
+          echo "sbom-valid=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "sbom-valid=false" >> "$GITHUB_OUTPUT"
+          echo "GuardRails could not generate an SBOM because no canonical report was available." >&2
+        fi
+    - name: Upload GuardRails evidence
+      if: ${{ always() && inputs.upload-report == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: guardrails-extension-report
+        path: ${{ inputs.report-path }}
+        if-no-files-found: warn
+        retention-days: 30
+    - name: Upload GuardRails SBOM
+      if: ${{ always() && inputs.upload-sbom == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: guardrails-extension-sbom
+        path: ${{ inputs.sbom-path }}
+        if-no-files-found: warn
+        retention-days: 30
+    - name: Enforce GuardRails outcome
+      if: ${{ steps.scan.outcome != 'success' }}
+      shell: bash
+      run: exit 1

@@ -14,13 +14,16 @@ from typing import Any
 from . import __version__
 from .exporters.html import export_html
 from .exporters.json_export import export_json
+from .exporters.sarif import export_sarif
 from .exporters.markdown import export_markdown
 from .environment import doctor_checks
 from .help_manual import TOPICS, manual
 from .report_reader import read_report, report_view, validate_report
 from .report_diff import compare_reports
+from .report_attestation import create_attestation, verify_attestation
+from .report_sbom import build_cyclonedx_sbom
 from .risk_brief import brief_exit_code, build_risk_brief, render_risk_brief, write_risk_brief
-from .policy import check_installed_extensions, load_policy_bundle, verify_artifact
+from .policy import check_capability_policy, check_installed_extensions, load_capability_policy_bundle, load_policy_bundle, verify_artifact
 from .collector import build_collector_snapshot, default_device_id, upload_collector_snapshot
 from .scan_service import run_with_profile, scan_installed
 from .scanner_adapter import (
@@ -40,7 +43,7 @@ from .ui.tables import key_values, table, terminal_width, truncate
 from .ui.theme import color, severity_label, severity_style
 
 
-EXPORT_FORMATS = ("terminal", "zip", "html", "md", "json")
+EXPORT_FORMATS = ("terminal", "zip", "html", "md", "json", "sarif")
 IDE_CHOICES = ("vscode", "cursor", "windsurf", "vscodium", "insiders")
 PICKER_PAGE_SIZE = 10
 
@@ -155,9 +158,21 @@ def build_parser() -> argparse.ArgumentParser:
     diff.add_argument("before")
     diff.add_argument("after")
     diff.add_argument("--format", choices=("terminal", "json"), default="terminal")
+    attest = report_subparsers.add_parser("attest", help="Create a portable SHA-256 digest attestation for a report.")
+    attest.add_argument("path")
+    attest.add_argument("--output", required=True)
+    attest_verify = report_subparsers.add_parser("attest-verify", help="Verify a report file against a digest attestation.")
+    attest_verify.add_argument("path")
+    attest_verify.add_argument("--attestation", required=True)
+    attest_verify.add_argument("--require-scan-id", help="Require the report to carry this scan ID.")
+    attest_verify.add_argument("--require-scanner-build", help="Require this scanner build identity.")
+    attest_verify.add_argument("--require-ruleset-version", help="Require this scanner ruleset version.")
+    sbom = report_subparsers.add_parser("sbom", help="Export exact extension artifacts and runtime dependencies as CycloneDX 1.5 JSON.")
+    sbom.add_argument("path")
+    sbom.add_argument("--output", required=True)
     export = report_subparsers.add_parser("export", help="Export without recalculating scanner evidence.")
     export.add_argument("path")
-    export.add_argument("--format", choices=("zip", "html", "md", "json"), required=True)
+    export.add_argument("--format", choices=("zip", "html", "md", "json", "sarif"), required=True)
     export.add_argument("--output", "--out", dest="output", required=True)
 
     rules = subparsers.add_parser("rules", help="Browse the scanner rule catalog.")
@@ -191,6 +206,9 @@ def build_parser() -> argparse.ArgumentParser:
     policy_verify.add_argument("--bundle", required=True, help="GuardRails enterprise policy JSON exported from the workspace.")
     policy_verify.add_argument("--artifact", required=True, help="Path to the published VSIX or other exact artifact file.")
     policy_verify.add_argument("--format", choices=("terminal", "json"), default="terminal", help="Output format.")
+    policy_capabilities = policy_subparsers.add_parser("capabilities", help="Enforce a downloaded GuardRails capability policy export.")
+    policy_capabilities.add_argument("--bundle", required=True, help="Capability policy JSON exported from the workspace.")
+    policy_capabilities.add_argument("--format", choices=("terminal", "json"), default="terminal", help="Output format.")
     help_command = subparsers.add_parser("help", help="Read the Guardrails command and workflow manual.")
     help_command.add_argument("topic", nargs="?", choices=TOPICS)
     subparsers.add_parser("tui", help="Open the interactive Local Scan terminal application.")
@@ -279,8 +297,16 @@ def _inventory_artifact_hash(row: dict[str, Any]) -> str | None:
 
 
 def cmd_policy(args: argparse.Namespace) -> int:
-    if args.policy_command not in {"check", "verify"}:
+    if args.policy_command not in {"check", "verify", "capabilities"}:
         raise ValueError("A policy command is required.")
+    if args.policy_command == "capabilities":
+        result = check_capability_policy(load_capability_policy_bundle(args.bundle))
+        if args.format == "json": print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            summary = result["summary"]
+            print(section("GuardRails capability policy"))
+            print(f"Subjects: {summary['subjects']}  Allowed: {summary['allowed']}  Denied: {summary['denied']}  Approval required: {summary['approval_required']}")
+        return 0 if result["summary"]["compliant"] else 1
     bundle = load_policy_bundle(args.bundle)
     if args.policy_command == "verify":
         result = verify_artifact(bundle, args.artifact)
@@ -307,7 +333,7 @@ def cmd_policy(args: argparse.Namespace) -> int:
         print(section("GuardRails enterprise policy"))
         print(f"Policy: {result['policy_hash'] or 'unidentified'}")
         print("Default action: DENY")
-        print(f"Installed: {summary['installed']}  Version-allowed: {summary['allowed']}  Unverified: {summary['unverified']}  Blocked: {summary['blocked']}")
+        print(f"Installed: {summary['installed']}  Version-allowed: {summary['allowed']}  Unverified: {summary['unverified']}  Related review: {summary['relationship_review_required']}  Blocked: {summary['blocked']}")
         if result["results"]:
             rows = [[item["status"].upper(), item["extension_id"], item["version"], item["client"]] for item in result["results"]]
             print(table(["Status", "Extension", "Version", "IDE"], rows, max_widths=[10, 42, 18, 14]))
@@ -317,6 +343,9 @@ def cmd_policy(args: argparse.Namespace) -> int:
             ]
             if explicit:
                 print(f"Capability note: {len(explicit)} allowed release(s) expose high-impact agent, process, network, credential, or native surfaces.")
+            relationship_review = [item for item in result["results"] if item.get("relationship_review") == "required"]
+            if relationship_review:
+                print(f"Relationship note: {len(relationship_review)} allowed release(s) declare related extensions that still need their own exact-release review.")
         print("Hash note: installed directories are version-checked but not byte-verified; use policy verify on the published VSIX before declaring compliance.")
     return 0 if result["summary"]["compliant"] else 1
 
@@ -541,6 +570,27 @@ def cmd_report(args: argparse.Namespace) -> int:
         if len(errors) > 20:
             print(color(f"- {len(errors) - 20} additional verification error(s) omitted", "red"))
         return 0 if ok else 1
+    if args.report_command == "attest":
+        output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True); output.write_text(json.dumps(create_attestation(args.path), indent=2, sort_keys=True) + "\n", encoding="utf-8"); print(f"Wrote digest attestation to {output}."); return 0
+    if args.report_command == "attest-verify":
+        required_claims = {
+            name: value
+            for name, value in {
+                "scan_id": args.require_scan_id,
+                "scanner_build": args.require_scanner_build,
+                "ruleset_version": args.require_ruleset_version,
+            }.items()
+            if value is not None
+        }
+        ok, message = verify_attestation(args.path, args.attestation, required_claims=required_claims)
+        print(message)
+        return 0 if ok else 1
+    if args.report_command == "sbom":
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(build_cyclonedx_sbom(read_report(args.path)), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"Wrote CycloneDX SBOM to {output}.")
+        return 0
     data = read_report(args.path)
     if args.format == "zip":
         if Path(args.path).suffix.lower() != ".zip":
@@ -551,6 +601,8 @@ def cmd_report(args: argparse.Namespace) -> int:
             _atomic_copy(source, destination)
     elif args.format == "json":
         export_json(data, args.output)
+    elif args.format == "sarif":
+        export_sarif(report_view(data), args.output)
     else:
         view = report_view(data)
         if args.format == "html":
@@ -671,6 +723,8 @@ def _export_fresh(report: dict[str, Any], fmt: str, output: str, *, source: str,
         export_markdown(view, output)
     elif fmt == "json":
         export_json(report, output)
+    elif fmt == "sarif":
+        export_sarif(display_report(report, source=source, profile=profile), output)
     else:
         raise ValueError(f"Unsupported export format: {fmt}")
 

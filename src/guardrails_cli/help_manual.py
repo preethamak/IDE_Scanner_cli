@@ -37,6 +37,8 @@ sensitive capability surfaces; extension code is never executed on the host.
   report view PATH                 Display a saved ZIP or JSON report
   report verify PATH               Validate report structure and identities
   report export PATH --format FMT  Convert a saved report without rescanning
+  report attest PATH --output FILE  Create a SHA-256 digest attestation
+  report attest-verify PATH --attestation FILE  Verify report bytes offline
   rules list                       List the complete rule catalog
   rules search QUERY               Search rule titles, IDs, and descriptions
   rules show RULE_ID               Explain one detection rule
@@ -194,6 +196,11 @@ not the original Marketplace VSIX. Such an installation is reported as
 version-allowed but unverified, and the policy check is not compliant until
 `policy verify` hashes the published artifact. Unknown versions fail closed
 because the policy default is DENY.
+
+An allowed parent extension does not approve its declared extension packs or
+dependencies. When a workspace reports incomplete relationship evidence,
+`policy check` calls it out as a separate review requirement. Each related
+release needs its own approved version and published-artifact hash.
 """,
     "automation": """# Automation
 

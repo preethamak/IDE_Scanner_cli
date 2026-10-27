@@ -34,6 +34,16 @@ class PolicyTests(unittest.TestCase):
                     "requires_explicit_review": True,
                     "review_reason": "high-impact capability",
                 },
+                "relationship_contract": {
+                    "declared": [{
+                        "extension_id": "partner.child-extension",
+                        "relationship": "extensionDependencies",
+                        "status": "acquisition_failed",
+                        "resolved_version": None,
+                        "resolved_artifact_sha256": None,
+                    }],
+                    "requires_separate_review": True,
+                },
             }],
         }
         bundle["enforcement"]["guardrails"]["exact_release_allowlist"] = bundle["entries"]  # type: ignore[index]
@@ -49,11 +59,23 @@ class PolicyTests(unittest.TestCase):
             {"extension_id": "publisher.extension", "version": "1.2.3", "client": "VS Code"},
             {"extension_id": "publisher.extension", "version": "1.2.4", "client": "VS Code"},
         ])
-        self.assertEqual(result["summary"], {"installed": 2, "allowed": 1, "blocked": 1, "unverified": 1, "compliant": False})
+        self.assertEqual(result["summary"], {"installed": 2, "allowed": 1, "blocked": 1, "unverified": 1, "relationship_review_required": 1, "compliant": False})
         self.assertEqual(result["results"][0]["status"], "version_allowed_unverified")
         self.assertEqual(result["results"][0]["hash_verification"], "required_not_available_for_installed_directory")
         self.assertTrue(result["results"][0]["capability_contract"]["requires_explicit_review"])
+        self.assertEqual(result["results"][0]["relationship_review"], "required")
+        self.assertIn("does not cover", result["results"][0]["reason"])
         self.assertEqual(result["results"][1]["status"], "blocked")
+
+    def test_bundle_loader_rejects_relationship_contract_that_hides_incomplete_review(self) -> None:
+        bundle = self.bundle()
+        bundle["entries"][0]["relationship_contract"]["requires_separate_review"] = False  # type: ignore[index]
+        bundle["policy_hash"] = compute_policy_hash(bundle)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            path.write_text(json.dumps(bundle), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "must require separate review"):
+                load_policy_bundle(path)
 
     def test_bundle_loader_rejects_non_guardrails_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -142,3 +164,15 @@ class PolicyTests(unittest.TestCase):
             result = verify_artifact(bundle, artifact)
             self.assertEqual(result["status"], "allowed")
             self.assertEqual(result["matched_releases"][0]["version"], "1.2.3")
+
+    def test_published_parent_artifact_requires_related_release_review(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "extension.vsix"
+            artifact.write_bytes(b"exact-published-parent-bytes")
+            bundle = self.bundle()
+            bundle["entries"][0]["artifact_sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()  # type: ignore[index]
+            bundle["enforcement"]["guardrails"]["exact_release_allowlist"] = bundle["entries"]  # type: ignore[index]
+            bundle["policy_hash"] = compute_policy_hash(bundle)
+            result = verify_artifact(bundle, artifact)
+            self.assertEqual(result["status"], "relationship_review_required")
+            self.assertIn("related extensions require", result["reason"])
