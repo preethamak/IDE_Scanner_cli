@@ -131,6 +131,25 @@ class GuardrailsCliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("Device id", error)
 
+    def test_collect_dry_run_emits_extensions_without_local_paths(self) -> None:
+        rows = [{"client": "Cursor", "path": "/private/extensions/one", "extension_id": "sample.one", "version": "1.0.0"}]
+        with patch("guardrails_cli.main.installed_extensions", return_value=rows):
+            code, output, error = self.run_cli(["collect", "--ide", "cursor", "--device-id", "laptop-1", "--dry-run"])
+        self.assertEqual((code, error), (0, ""))
+        self.assertIn('"extension_id": "sample.one"', output)
+        self.assertNotIn("/private", output)
+
+    def test_collect_uses_workspace_key_and_prints_server_receipt(self) -> None:
+        rows = [{"client": "Cursor", "extension_id": "sample.one", "version": "1.0.0"}]
+        with (
+            patch("guardrails_cli.main.installed_extensions", return_value=rows),
+            patch("guardrails_cli.main.upload_collector_snapshot", return_value={"device_id": "laptop-1", "inventory": {"extensions": 1}, "capability_graph": {"subjects": 2}}) as upload,
+        ):
+            code, output, error = self.run_cli(["collect", "--ide", "cursor", "--device-id", "laptop-1", "--api-key", "grk_live_test", "--server", "https://example.test"])
+        self.assertEqual((code, error), (0, ""))
+        self.assertIn("Collector accepted device laptop-1", output)
+        self.assertEqual(upload.call_args.args[:2], ("https://example.test", "grk_live_test"))
+
     def test_tui_requires_an_interactive_terminal(self) -> None:
         code, _output, error = self.run_cli(["tui"])
         self.assertEqual(code, 2)
