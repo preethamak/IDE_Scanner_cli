@@ -174,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--device-id", help="Stable non-secret device identifier.")
     collect.add_argument("--device-name", help="Human-readable device label.")
     collect.add_argument("--timeout", type=int, default=30, help="Upload timeout in seconds (1-120).")
+    collect.add_argument("--retries", type=int, default=2, help="Retry transient collector failures this many times (0-5).")
     collect.add_argument("--dry-run", action="store_true", help="Print the privacy-preserving snapshot without sending it.")
     policy = subparsers.add_parser("policy", help="Check installed extensions against an enterprise GuardRails policy bundle.")
     policy_subparsers = policy.add_subparsers(dest="policy_command", required=True)
@@ -237,6 +238,8 @@ def cmd_inventory(args: argparse.Namespace) -> int:
 def cmd_collect(args: argparse.Namespace) -> int:
     if not 1 <= args.timeout <= 120:
         raise ValueError("Collector timeout must be between 1 and 120 seconds.")
+    if not 0 <= args.retries <= 5:
+        raise ValueError("Collector retries must be between 0 and 5.")
     rows = [row for row in installed_extensions() if _ide_key(str(row.get("client") or "")) == args.ide]
     if not rows:
         raise ValueError(f"No installed extensions were detected for {args.ide}.")
@@ -250,8 +253,9 @@ def cmd_collect(args: argparse.Namespace) -> int:
     api_key = args.api_key or os.environ.get("GUARDRAILS_API_KEY", "")
     if not api_key:
         raise ValueError("Provide --api-key or set GUARDRAILS_API_KEY.")
-    receipt = upload_collector_snapshot(args.server, api_key, snapshot, timeout=args.timeout)
-    print(f"Collector accepted device {receipt.get('device_id', device_id)} with {receipt.get('inventory', {}).get('extensions', 0)} extensions and {receipt.get('capability_graph', {}).get('subjects', 0)} non-extension capabilities.")
+    receipt = upload_collector_snapshot(args.server, api_key, snapshot, timeout=args.timeout, retries=args.retries)
+    suffix = " (retry confirmed)" if receipt.get("duplicate") else ""
+    print(f"Collector accepted device {receipt.get('device_id', device_id)} with {receipt.get('inventory', {}).get('extensions', 0)} extensions and {receipt.get('capability_graph', {}).get('subjects', 0)} non-extension capabilities. Receipt: {receipt.get('receipt_id', 'unavailable')}{suffix}")
     return 0
 
 
